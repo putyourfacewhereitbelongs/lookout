@@ -1,0 +1,6 @@
+{
+  "name": "Lookout AI",
+  "description": "Advanced AI DVR with real-time multi-camera detection, facial and animal recognition, colored night vision, 60fps thermal silhouette tracking, and assistive scene analysis.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
