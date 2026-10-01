@@ -92,8 +92,13 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
     setEditNotes(profile.notes || '');
     setRegistrationTarget('__new__');
     setRegistrationMessage('');
-    if (profile.subjectType === 'person') faceRecognitionService.getSubjects().then(setComprefaceSubjects);
-    else setComprefaceSubjects([]);
+    if (profile.subjectType === 'person') {
+      faceRecognitionService.getSubjects()
+        .then(setComprefaceSubjects)
+        .catch(() => setComprefaceSubjects([]));
+    } else {
+      setComprefaceSubjects([]);
+    }
   };
 
   const handleSaveName = () => {

@@ -1,0 +1,111 @@
+name: lookout
+
+services:
+  lookout:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${LOOKOUT_BIND_ADDRESS:-0.0.0.0}:${LOOKOUT_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # The default points at the CompreFace UI service on this Compose network.
+      # Use LOOKOUT_COMPREFACE_URL only when intentionally targeting another host.
+      COMPREFACE_URL: "${LOOKOUT_COMPREFACE_URL:-http://compreface-ui}"
+      COMPREFACE_API_KEY: "${COMPREFACE_API_KEY:-}"
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+    depends_on:
+      compreface-ui:
+        condition: service_started
+
+  # CompreFace 1.2.0 components, based on the upstream Compose distribution:
+  # https://github.com/exadel-inc/CompreFace/blob/master/docker-compose.yml
+  compreface-postgres-db:
+    image: exadel/compreface-postgres-db:1.2.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${COMPREFACE_POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${COMPREFACE_POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_DB: "${COMPREFACE_POSTGRES_DB:-frs}"
+    volumes:
+      - compreface-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  compreface-core:
+    image: exadel/compreface-core:1.2.0
+    restart: unless-stopped
+    environment:
+      ML_PORT: 3000
+      IMG_LENGTH_LIMIT: "${COMPREFACE_MAX_DETECT_SIZE:-640}"
+      UWSGI_PROCESSES: "${COMPREFACE_UWSGI_PROCESSES:-2}"
+      UWSGI_THREADS: "${COMPREFACE_UWSGI_THREADS:-1}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://localhost:3000/healthcheck || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  compreface-api:
+    image: exadel/compreface-api:1.2.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${COMPREFACE_POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${COMPREFACE_POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_URL: "jdbc:postgresql://compreface-postgres-db:5432/${COMPREFACE_POSTGRES_DB:-frs}"
+      SPRING_PROFILES_ACTIVE: dev
+      API_JAVA_OPTS: "${COMPREFACE_API_JAVA_OPTS:--Xmx4g}"
+      SAVE_IMAGES_TO_DB: "${COMPREFACE_SAVE_IMAGES_TO_DB:-true}"
+      MAX_FILE_SIZE: "${COMPREFACE_MAX_FILE_SIZE:-5MB}"
+      MAX_REQUEST_SIZE: "${COMPREFACE_MAX_REQUEST_SIZE:-10M}B"
+      CONNECTION_TIMEOUT: "${COMPREFACE_CONNECTION_TIMEOUT:-10000}"
+      READ_TIMEOUT: "${COMPREFACE_READ_TIMEOUT:-60000}"
+    depends_on:
+      compreface-postgres-db:
+        condition: service_healthy
+      compreface-core:
+        condition: service_healthy
+
+  compreface-admin:
+    image: exadel/compreface-admin:1.2.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${COMPREFACE_POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${COMPREFACE_POSTGRES_PASSWORD:-postgres}"
+      POSTGRES_URL: "jdbc:postgresql://compreface-postgres-db:5432/${COMPREFACE_POSTGRES_DB:-frs}"
+      SPRING_PROFILES_ACTIVE: dev
+      ENABLE_EMAIL_SERVER: "false"
+      ADMIN_JAVA_OPTS: "${COMPREFACE_ADMIN_JAVA_OPTS:--Xmx1g}"
+      MAX_FILE_SIZE: "${COMPREFACE_MAX_FILE_SIZE:-5MB}"
+      MAX_REQUEST_SIZE: "${COMPREFACE_MAX_REQUEST_SIZE:-10M}B"
+    depends_on:
+      compreface-postgres-db:
+        condition: service_healthy
+      compreface-api:
+        condition: service_started
+
+  compreface-ui:
+    image: exadel/compreface-fe:1.2.0
+    restart: unless-stopped
+    ports:
+      # Keep the CompreFace administration UI local by default.
+      - "${COMPREFACE_BIND_ADDRESS:-127.0.0.1}:${COMPREFACE_PORT:-8000}:80"
+    environment:
+      CLIENT_MAX_BODY_SIZE: "${COMPREFACE_MAX_REQUEST_SIZE:-10M}"
+      PROXY_READ_TIMEOUT: "${COMPREFACE_READ_TIMEOUT:-60000}ms"
+      PROXY_CONNECT_TIMEOUT: "${COMPREFACE_CONNECTION_TIMEOUT:-10000}ms"
+    depends_on:
+      compreface-api:
+        condition: service_started
+      compreface-admin:
+        condition: service_started
+
+volumes:
+  compreface-postgres-data:

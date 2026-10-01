@@ -9,7 +9,8 @@ dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
 var app = express();
-var PORT = 3e3;
+var requestedPort = Number.parseInt(process.env.PORT || "3000", 10);
+var PORT = Number.isInteger(requestedPort) && requestedPort > 0 ? requestedPort : 3e3;
 app.use(express.json({ limit: "150mb" }));
 function getGroqVisionClient() {
   const apiKey = process.env.GROQ_API_KEY;
@@ -62,10 +63,20 @@ function getLocalNetworkIp() {
   return "192.168.1.120";
 }
 var sharedSyncStore = null;
-var COMPREFACE_URL = process.env.COMPREFACE_URL || "https://ladder-attitude-reputation-wichita.trycloudflare.com/";
-var COMPREFACE_API_KEY = process.env.COMPREFACE_API_KEY || "d3e27248-1de9-42c8-88b2-96ea9743cf9a";
+var COMPREFACE_URL = (process.env.COMPREFACE_URL || "http://localhost:8000").replace(/\/+$/, "");
+var COMPREFACE_API_KEY = process.env.COMPREFACE_API_KEY?.trim() || "";
+var COMPREFACE_API_KEY_REQUIRED = "CompreFace API is not configured. Create a Face Recognition Service in CompreFace and set COMPREFACE_API_KEY.";
+function comprefaceUrl(pathname) {
+  return `${COMPREFACE_URL}${pathname}`;
+}
+function comprefaceHeaders() {
+  return COMPREFACE_API_KEY ? { "x-api-key": COMPREFACE_API_KEY } : {};
+}
 app.post("/api/recognition/recognize", async (req, res) => {
   try {
+    if (!COMPREFACE_API_KEY) {
+      return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, result: [] });
+    }
     const { imageBase64 } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ success: false, error: "Missing imageBase64" });
@@ -75,14 +86,14 @@ app.post("/api/recognition/recognize", async (req, res) => {
     const formData = new FormData();
     const blob = new Blob([buffer], { type: "image/jpeg" });
     formData.append("file", blob, "frame.jpg");
-    const targetUrl = `${COMPREFACE_URL}/api/v1/recognition/recognize?det_prob_threshold=0.35&face_plugins=landmarks`;
+    const targetUrl = comprefaceUrl("/api/v1/recognition/recognize?det_prob_threshold=0.35&face_plugins=landmarks");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15e3);
     let response;
     try {
       response = await fetch(targetUrl, {
         method: "POST",
-        headers: { "x-api-key": COMPREFACE_API_KEY },
+        headers: comprefaceHeaders(),
         body: formData,
         signal: controller.signal
       });
@@ -111,15 +122,23 @@ app.post("/api/recognition/recognize", async (req, res) => {
 });
 app.get("/api/recognition/subjects", async (_req, res) => {
   try {
-    const targetUrl = `${COMPREFACE_URL}/api/v1/recognition/subjects`;
+    if (!COMPREFACE_API_KEY) {
+      return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, subjects: [] });
+    }
+    const targetUrl = comprefaceUrl("/api/v1/recognition/subjects");
     const response = await fetch(targetUrl, {
       method: "GET",
-      headers: {
-        "x-api-key": COMPREFACE_API_KEY
-      },
+      headers: comprefaceHeaders(),
       signal: AbortSignal.timeout(6e3)
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return res.status(502).json({
+        success: false,
+        error: `CompreFace returned HTTP ${response.status}. Check COMPREFACE_API_KEY.`,
+        subjects: []
+      });
+    }
     res.json({ success: true, subjects: data?.subjects || [] });
   } catch (err) {
     console.error("Fetch subjects error:", err);
@@ -128,11 +147,21 @@ app.get("/api/recognition/subjects", async (_req, res) => {
 });
 app.get("/api/recognition/subject-images", async (_req, res) => {
   try {
-    const response = await fetch(`${COMPREFACE_URL}/api/v1/recognition/faces?page=0&size=1000`, {
-      headers: { "x-api-key": COMPREFACE_API_KEY },
+    if (!COMPREFACE_API_KEY) {
+      return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, images: {} });
+    }
+    const response = await fetch(comprefaceUrl("/api/v1/recognition/faces?page=0&size=1000"), {
+      headers: comprefaceHeaders(),
       signal: AbortSignal.timeout(6e3)
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return res.status(502).json({
+        success: false,
+        error: `CompreFace returned HTTP ${response.status}. Check COMPREFACE_API_KEY.`,
+        images: {}
+      });
+    }
     const images = {};
     for (const face of data?.faces || []) {
       if (face?.subject && face?.image_id && !images[face.subject]) {
@@ -147,8 +176,11 @@ app.get("/api/recognition/subject-images", async (_req, res) => {
 });
 app.get("/api/recognition/faces/:imageId/image", async (req, res) => {
   try {
-    const response = await fetch(`${COMPREFACE_URL}/api/v1/recognition/faces/${encodeURIComponent(req.params.imageId)}/img`, {
-      headers: { "x-api-key": COMPREFACE_API_KEY },
+    if (!COMPREFACE_API_KEY) {
+      return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED });
+    }
+    const response = await fetch(comprefaceUrl(`/api/v1/recognition/faces/${encodeURIComponent(req.params.imageId)}/img`), {
+      headers: comprefaceHeaders(),
       signal: AbortSignal.timeout(6e3)
     });
     if (!response.ok) return res.sendStatus(response.status);
@@ -161,6 +193,9 @@ app.get("/api/recognition/faces/:imageId/image", async (req, res) => {
 });
 app.post("/api/recognition/faces", async (req, res) => {
   try {
+    if (!COMPREFACE_API_KEY) {
+      return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED });
+    }
     const { subject, imageBase64 } = req.body;
     if (!subject || !imageBase64) {
       return res.status(400).json({ success: false, error: "Missing subject or imageBase64" });
@@ -170,16 +205,20 @@ app.post("/api/recognition/faces", async (req, res) => {
     const formData = new FormData();
     const blob = new Blob([buffer], { type: "image/jpeg" });
     formData.append("file", blob, "face.jpg");
-    const targetUrl = `${COMPREFACE_URL}/api/v1/recognition/faces?subject=${encodeURIComponent(subject)}`;
+    const targetUrl = comprefaceUrl(`/api/v1/recognition/faces?subject=${encodeURIComponent(subject)}`);
     const response = await fetch(targetUrl, {
       method: "POST",
-      headers: {
-        "x-api-key": COMPREFACE_API_KEY
-      },
+      headers: comprefaceHeaders(),
       body: formData,
       signal: AbortSignal.timeout(1e4)
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      return res.status(502).json({
+        success: false,
+        error: `CompreFace returned HTTP ${response.status}. Check COMPREFACE_API_KEY.`
+      });
+    }
     res.json({ success: true, data });
   } catch (err) {
     console.error("Enroll face error:", err);
@@ -187,15 +226,27 @@ app.post("/api/recognition/faces", async (req, res) => {
   }
 });
 app.get("/api/recognition/status", async (_req, res) => {
+  if (!COMPREFACE_API_KEY) {
+    return res.json({
+      online: false,
+      configured: false,
+      endpoint: COMPREFACE_URL,
+      error: COMPREFACE_API_KEY_REQUIRED,
+      plugins: ["landmarks"],
+      subjectCount: 0,
+      subjects: []
+    });
+  }
   try {
-    const targetUrl = `${COMPREFACE_URL}/api/v1/recognition/subjects`;
+    const targetUrl = comprefaceUrl("/api/v1/recognition/subjects");
     const response = await fetch(targetUrl, {
-      headers: { "x-api-key": COMPREFACE_API_KEY },
+      headers: comprefaceHeaders(),
       signal: AbortSignal.timeout(5e3)
     });
     const data = await response.json();
     res.json({
       online: response.ok,
+      configured: true,
       endpoint: COMPREFACE_URL,
       plugins: ["landmarks"],
       subjectCount: data?.subjects?.length || 0,
@@ -204,6 +255,7 @@ app.get("/api/recognition/status", async (_req, res) => {
   } catch (err) {
     res.json({
       online: false,
+      configured: true,
       endpoint: COMPREFACE_URL,
       error: err.message,
       plugins: ["landmarks"],

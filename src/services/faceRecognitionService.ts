@@ -60,23 +60,21 @@ export class FaceRecognitionService {
    * Fetch all registered subjects from CompreFace database
    */
   async getSubjects(): Promise<string[]> {
-    try {
-      const res = await fetch('/api/recognition/subjects');
-      const data = await res.json();
-      return data.subjects || [];
-    } catch {
-      return [];
+    const res = await fetch('/api/recognition/subjects');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `CompreFace subjects request failed (${res.status}).`);
     }
+    return Array.isArray(data.subjects) ? data.subjects : [];
   }
 
   async getSubjectImages(): Promise<Record<string, string>> {
-    try {
-      const res = await fetch('/api/recognition/subject-images');
-      const data = await res.json();
-      return data.images || {};
-    } catch {
-      return {};
+    const res = await fetch('/api/recognition/subject-images');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `CompreFace face-images request failed (${res.status}).`);
     }
+    return data.images && typeof data.images === 'object' ? data.images : {};
   }
 
   /**
@@ -111,7 +109,7 @@ export class FaceRecognitionService {
     } catch (err: any) {
       return {
         online: false,
-        endpoint: 'https://bolt-collectible-brake-basic.trycloudflare.com',
+        endpoint: '',
         subjectCount: 0,
         subjects: [],
       };
