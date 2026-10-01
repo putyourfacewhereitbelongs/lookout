@@ -491,6 +491,8 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
     let timer: any = null;
+    let lastLongRangeScanAt = 0;
+    const longRangeScanInterval = isPhone ? 7000 : 3500;
 
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
@@ -500,23 +502,30 @@ export function App() {
       }
 
       const video = videoElementRef.current;
+      const longRangeCaptureDue = Date.now() - lastLongRangeScanAt >= longRangeScanInterval;
       let snapshotBase64 = '';
-      let snapW = isPhone ? 960 : 1920;
+      let snapW = isPhone ? 960 : (longRangeCaptureDue ? 2560 : 1920);
       let snapH = 270;
       let recognitionCanvas: HTMLCanvasElement | null = null;
 
-      // Keep enough native image detail for faces that occupy a small part of the frame.
+      // Keep normal recognition inexpensive. On the scheduled long-range pass,
+      // preserve materially more of the desktop camera's native detail before
+      // splitting it into enlarged face tiles. Phones retain their lighter
+      // capture policy for live responsiveness.
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
         const offscreen = document.createElement('canvas');
         recognitionCanvas = offscreen;
-        snapW = Math.min(isPhone ? 960 : 1920, video.videoWidth);
+        const maximumWidth = isPhone ? 960 : (longRangeCaptureDue ? 2560 : 1920);
+        snapW = Math.min(maximumWidth, video.videoWidth);
         snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
         offscreen.width = snapW;
         offscreen.height = snapH;
         const ctx = offscreen.getContext('2d');
         if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(video, 0, 0, snapW, snapH);
-          snapshotBase64 = offscreen.toDataURL('image/jpeg', 0.84);
+          snapshotBase64 = offscreen.toDataURL('image/jpeg', isPhone ? 0.84 : (longRangeCaptureDue ? 0.90 : 0.84));
         }
       }
 
@@ -531,7 +540,12 @@ export function App() {
       }
 
       try {
-        const detections = await faceRecognitionService.recognize(snapshotBase64);
+        const now = Date.now();
+        const runLongRangeScan = Boolean(recognitionCanvas && longRangeCaptureDue);
+        if (runLongRangeScan) lastLongRangeScanAt = now;
+        const detections = runLongRangeScan && recognitionCanvas
+          ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
+          : await faceRecognitionService.recognize(snapshotBase64);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
@@ -1131,7 +1145,7 @@ export function App() {
     (cue.type === 'speech' || cue.type === 'status') && Date.now() - cue.timestamp < 12000
   );
 
-  const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 1920) => {
+  const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 2560) => {
     const video = videoElementRef.current;
     if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
     const width = Math.min(maxWidth, video.videoWidth);
@@ -1142,7 +1156,7 @@ export function App() {
     const context = frame.getContext('2d');
     if (!context) return null;
     context.drawImage(video, 0, 0, width, height);
-    return { imageBase64: frame.toDataURL('image/jpeg', 0.84), width, height };
+    return { imageBase64: frame.toDataURL('image/jpeg', isPhone ? 0.84 : 0.90), width, height, canvas: frame };
   };
 
   const showScanFeedback = (message: string) => {
@@ -1449,7 +1463,7 @@ export function App() {
                   return;
                 }
                 audioEngine.playAlertTone('radar_ping');
-                const dets = await faceRecognitionService.recognize(frame.imageBase64);
+                const dets = await faceRecognitionService.recognizeAtLongRange(frame.imageBase64, frame.canvas);
                 if (faceRecognitionService.getLastRecognitionError()) {
                   showScanFeedback(`Face recognition error: ${faceRecognitionService.getLastRecognitionError()}`);
                   return;

@@ -77,18 +77,20 @@ app.post("/api/recognition/recognize", async (req, res) => {
     if (!COMPREFACE_API_KEY) {
       return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, result: [] });
     }
-    const { imageBase64 } = req.body;
+    const { imageBase64, detectionProfile } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ success: false, error: "Missing imageBase64" });
     }
+    const isDistantScan = detectionProfile === "distant";
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
     const formData = new FormData();
     const blob = new Blob([buffer], { type: "image/jpeg" });
     formData.append("file", blob, "frame.jpg");
-    const targetUrl = comprefaceUrl("/api/v1/recognition/recognize?det_prob_threshold=0.35&face_plugins=landmarks");
+    const detectorThreshold = isDistantScan ? 0.25 : 0.35;
+    const targetUrl = comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&face_plugins=landmarks`);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15e3);
+    const timeout = setTimeout(() => controller.abort(), isDistantScan ? 8e3 : 15e3);
     let response;
     try {
       response = await fetch(targetUrl, {

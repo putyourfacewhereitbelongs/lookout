@@ -98,10 +98,11 @@ app.post('/api/recognition/recognize', async (req, res) => {
       return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, result: [] });
     }
 
-    const { imageBase64 } = req.body;
+    const { imageBase64, detectionProfile } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ success: false, error: 'Missing imageBase64' });
     }
+    const isDistantScan = detectionProfile === 'distant';
 
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
     const buffer = Buffer.from(cleanBase64, 'base64');
@@ -110,12 +111,15 @@ app.post('/api/recognition/recognize', async (req, res) => {
     const blob = new Blob([buffer], { type: 'image/jpeg' });
     formData.append('file', blob, 'frame.jpg');
 
-    // Keep the detector permissive for small/distant faces. Identity matching
-    // is gated separately in the client with a much higher similarity floor.
-    const targetUrl = comprefaceUrl('/api/v1/recognition/recognize?det_prob_threshold=0.35&face_plugins=landmarks');
+    // The normal stream pass is permissive. Enlarged long-range tiles are
+    // allowed a lower detector threshold because the client still requires a
+    // configured identity similarity and an unambiguous match before naming a
+    // person. This improves small-face recall without weakening ID safety.
+    const detectorThreshold = isDistantScan ? 0.25 : 0.35;
+    const targetUrl = comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&face_plugins=landmarks`);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), isDistantScan ? 8000 : 15000);
     let response: Response;
     try {
       response = await fetch(targetUrl, {

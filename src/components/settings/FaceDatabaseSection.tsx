@@ -365,6 +365,9 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
           <span className="px-2 py-0.5 rounded text-[10px] bg-blue-950 border border-blue-800 text-blue-300 font-bold">
             ALWAYS-FOLLOWING PERSON TARGET LOCK
           </span>
+          <span className="px-2 py-0.5 rounded text-[10px] bg-violet-950 border border-violet-800 text-violet-200 font-bold">
+            LONG-RANGE 3 × 2 FACE SCAN
+          </span>
         </div>
 
         {/* Enrolled CompreFace Subjects */}
