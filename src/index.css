@@ -10,6 +10,28 @@
   }
 }
 
+:root {
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+html {
+  background: #090d16;
+}
+
+button,
+[role='button'] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
 /* Custom scrollbar for desktop views */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
@@ -28,4 +50,37 @@
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(100, 116, 139, 0.9);
+}
+
+@media (max-width: 639px) {
+  .app-shell {
+    min-height: 100dvh;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .app-header {
+    padding-top: max(0.625rem, env(safe-area-inset-top));
+  }
+
+  /* Keep controls comfortably tappable without zooming the page on focus. */
+  button,
+  [role='button'] {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  select,
+  textarea {
+    min-height: 44px;
+    font-size: 16px !important;
+  }
+
+  .mobile-overlay {
+    padding: max(0.75rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) max(0.75rem, env(safe-area-inset-bottom)) max(0.75rem, env(safe-area-inset-left));
+  }
+
+  .mobile-dialog {
+    max-height: calc(100dvh - 1.5rem);
+  }
 }

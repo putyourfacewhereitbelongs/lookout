@@ -98,7 +98,7 @@ export const SceneDetailsDrawer: React.FC<SceneDetailsDrawerProps> = ({
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-[500px] bg-slate-900 border-l border-slate-700/80 shadow-2xl p-5 flex flex-col text-slate-100 overflow-y-auto animate-slide-left custom-scrollbar">
+    <div className="fixed inset-y-0 right-0 z-50 flex w-full flex-col overflow-y-auto border-l border-slate-700/80 bg-slate-900 p-4 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] text-slate-100 shadow-2xl animate-slide-left custom-scrollbar sm:w-[500px] sm:p-5">
       {/* Drawer Header */}
       <div className="flex items-center justify-between pb-4 border-b border-slate-800">
         <div className="flex items-center gap-3">

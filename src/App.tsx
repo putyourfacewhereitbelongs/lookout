@@ -132,6 +132,12 @@ export function App() {
   const [currentTheme, setCurrentTheme] = useState<UIThemeMode>(
     StorageService.getTheme()
   );
+  // Coarse-pointer and narrow-screen devices benefit from lower capture and
+  // inference rates. This keeps the live view responsive without changing the
+  // desktop DVR pipeline.
+  const [isPhone, setIsPhone] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 767px), (pointer: coarse)').matches
+  );
 
   // State: Modals & Panels
   const [showQRModal, setShowQRModal] = useState(false);
@@ -217,6 +223,14 @@ export function App() {
     });
     setHistoryEvents(saved);
   }, [activeCamera, activeCamId]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(max-width: 767px), (pointer: coarse)');
+    const updateDeviceMode = () => setIsPhone(mediaQuery.matches);
+    updateDeviceMode();
+    mediaQuery.addEventListener?.('change', updateDeviceMode);
+    return () => mediaQuery.removeEventListener?.('change', updateDeviceMode);
+  }, []);
 
   // Save changes to local database
   useEffect(() => {
@@ -312,10 +326,10 @@ export function App() {
       // AudioEngine mutates its cue buffer in place; clone it so new transcripts trigger a render.
       setAudioCues([...cues]);
 
-    }, 120);
+    }, isPhone ? 250 : 120);
 
     return () => clearInterval(interval);
-  }, [accessibility.voiceCommandsAndNarration, handleVoiceCommand]);
+  }, [accessibility.voiceCommandsAndNarration, handleVoiceCommand, isPhone]);
 
   // Request actual camera stream if local or screen
   useEffect(() => {
@@ -339,7 +353,9 @@ export function App() {
         attachStream(activeCamera.stream);
       } else if (activeCamera.type === 'local') {
         try {
-          const video = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
+          const video = isPhone
+            ? { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 30, max: 30 } }
+            : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
           let s: MediaStream;
           try {
             s = await navigator.mediaDevices.getUserMedia({
@@ -366,7 +382,7 @@ export function App() {
       } else if (activeCamera.type === 'screen') {
         try {
           const s = await navigator.mediaDevices.getDisplayMedia({
-            video: { frameRate: { ideal: 60 } },
+            video: isPhone ? { frameRate: { ideal: 30, max: 30 } } : { frameRate: { ideal: 60 } },
             audio: true,
           });
           currentStream = s;
@@ -391,7 +407,7 @@ export function App() {
         currentStream.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [activeCamId, activeCamera, cameraRetryKey]);
+  }, [activeCamId, activeCamera, cameraRetryKey, isPhone]);
 
   // References for zero-jitter, continuous 60 FPS render pipeline
   const detectedObjectsRef = useRef<DetectionObject[]>([]);
@@ -418,9 +434,19 @@ export function App() {
     let frameCount = 0;
     let lastFpsTime = performance.now();
     let lastSyncTime = 0;
+    let lastRenderTime = 0;
+    const renderInterval = isPhone ? 1000 / 30 : 0;
 
-    const loop = () => {
-      // Step physics interpolation on every frame for buttery smooth 60 FPS motion following
+    const loop = (timestamp: number) => {
+      // Rendering a 720p overlay at the display refresh rate is unnecessarily
+      // expensive on many phones. Keep desktop at native refresh, cap phone
+      // rendering at 30fps, and preserve the same tracking behavior.
+      if (renderInterval && timestamp - lastRenderTime < renderInterval) {
+        animationFrameId = requestAnimationFrame(loop);
+        return;
+      }
+      lastRenderTime = timestamp;
+
       detectedObjectsRef.current = faceRecognitionService.stepPhysicsTracking(detectedObjectsRef.current);
 
       // Render frame with shaders, edge detection, red silhouette, biometric landmarks & HUD
@@ -436,7 +462,7 @@ export function App() {
 
       // 60 FPS counter update
       frameCount++;
-      const now = performance.now();
+      const now = timestamp;
       if (now - lastFpsTime >= 1000) {
         setFpsDisplay(Math.round((frameCount * 1000) / (now - lastFpsTime)));
         frameCount = 0;
@@ -457,7 +483,7 @@ export function App() {
     return () => {
       cancelAnimationFrame(animationFrameId);
     };
-  }, []);
+  }, [isPhone]);
 
   // Continuous CompreFace Facial Recognition Cycle:
   // Low-latency neural face recognition via CompreFace proxy,
@@ -469,13 +495,13 @@ export function App() {
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
       if (!storagePreferences.facialRecognitionMasterEnabled) {
-        timer = setTimeout(runCompreFaceRecognitionCycle, 400);
+        timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 800 : 400);
         return;
       }
 
       const video = videoElementRef.current;
       let snapshotBase64 = '';
-      let snapW = 1920;
+      let snapW = isPhone ? 960 : 1920;
       let snapH = 270;
       let recognitionCanvas: HTMLCanvasElement | null = null;
 
@@ -483,7 +509,7 @@ export function App() {
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
         const offscreen = document.createElement('canvas');
         recognitionCanvas = offscreen;
-        snapW = Math.min(1920, video.videoWidth);
+        snapW = Math.min(isPhone ? 960 : 1920, video.videoWidth);
         snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
         offscreen.width = snapW;
         offscreen.height = snapH;
@@ -495,12 +521,12 @@ export function App() {
       }
 
       if (!snapshotBase64) {
-        if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, 350);
+        if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
       }
 
       if (recognitionCanvas && detectGlobalCameraMotion(recognitionCanvas)) {
-        if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, 120);
+        if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 360 : 120);
         return;
       }
 
@@ -604,23 +630,24 @@ export function App() {
       if (isMounted) {
         // Avoid serializing oversized frames faster than the remote recognizer
         // can consume them; latency depends on one request's completion time.
-        timer = setTimeout(runCompreFaceRecognitionCycle, 120);
+        timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 500 : 120);
       }
     };
 
-    timer = setTimeout(runCompreFaceRecognitionCycle, 250);
+    timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 700 : 250);
 
     return () => {
       isMounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion]);
+  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, isPhone]);
 
   // Real-time object detection pipeline.
   // Really identifies physical objects, items, pets, and vehicles from the live video stream.
   useEffect(() => {
     let isMounted = true;
     let objectTimer: any = null;
+    const objectDetectionInterval = isPhone ? 3000 : 1500;
 
     const runObjectDetectionCycle = async () => {
       if (!isMounted) return;
@@ -631,7 +658,7 @@ export function App() {
           detectedObjectsRef.current = people;
           setDetectedObjects([...people]);
         }
-        objectTimer = setTimeout(runObjectDetectionCycle, 1500);
+        objectTimer = setTimeout(runObjectDetectionCycle, objectDetectionInterval);
         return;
       }
 
@@ -640,7 +667,7 @@ export function App() {
       let detectionFrame: HTMLCanvasElement | null = null;
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
         const offscreen = document.createElement('canvas');
-        const snapW = 640;
+        const snapW = isPhone ? 480 : 640;
         const snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
         offscreen.width = snapW;
         offscreen.height = snapH;
@@ -654,7 +681,7 @@ export function App() {
 
       if (snapshotBase64) {
         if (detectionFrame && detectGlobalCameraMotion(detectionFrame)) {
-          objectTimer = setTimeout(runObjectDetectionCycle, 1500);
+          objectTimer = setTimeout(runObjectDetectionCycle, objectDetectionInterval);
           return;
         }
         try {
@@ -669,7 +696,7 @@ export function App() {
               return category.enabled && item.confidence >= category.confidenceThreshold;
             });
             if (filteredObjects.length === 0) {
-              objectTimer = setTimeout(runObjectDetectionCycle, 1500);
+              objectTimer = setTimeout(runObjectDetectionCycle, objectDetectionInterval);
               return;
             }
             const merged = faceRecognitionService.correlateObjectDetections(
@@ -794,17 +821,17 @@ export function App() {
       }
 
       if (isMounted) {
-        objectTimer = setTimeout(runObjectDetectionCycle, 1500);
+        objectTimer = setTimeout(runObjectDetectionCycle, objectDetectionInterval);
       }
     };
 
-    objectTimer = setTimeout(runObjectDetectionCycle, 1000);
+    objectTimer = setTimeout(runObjectDetectionCycle, isPhone ? 2000 : 1000);
 
     return () => {
       isMounted = false;
       if (objectTimer) clearTimeout(objectTimer);
     };
-  }, [detectionSensitivities.objects.enabled, detectionSensitivities.objects.confidenceThreshold, detectionSensitivities.objects.audibleChime, detectionSensitivities.animals, detectionSensitivities.cars, detectionSensitivities.fixedCameraGuard, alertNotifications, activeCamera, activeCamId, recordHistoryEvent, detectGlobalCameraMotion]);
+  }, [detectionSensitivities.objects.enabled, detectionSensitivities.objects.confidenceThreshold, detectionSensitivities.objects.audibleChime, detectionSensitivities.animals, detectionSensitivities.cars, detectionSensitivities.fixedCameraGuard, alertNotifications, activeCamera, activeCamId, recordHistoryEvent, detectGlobalCameraMotion, isPhone]);
 
   // Periodic Scene AI Analysis (Deep multimodal scene inspection)
   const runSceneAnalysis = useCallback(async () => {
@@ -940,12 +967,13 @@ export function App() {
     }
   }, [activeCamera, activeCamId, detectionSensitivities.objects.enabled, detectionSensitivities.fixedCameraGuard, alertNotifications, recordHistoryEvent]);
 
-  // Initial Scene Analysis trigger
+  // Phones run the local scene model less often to avoid competing with camera
+  // capture, while the manual Scene Details button remains available at any time.
   useEffect(() => {
-    const timer = setTimeout(runSceneAnalysis, 2000);
-    const interval = setInterval(runSceneAnalysis, 15000);
+    const timer = setTimeout(runSceneAnalysis, isPhone ? 5000 : 2000);
+    const interval = setInterval(runSceneAnalysis, isPhone ? 60_000 : 15_000);
     return () => { clearTimeout(timer); clearInterval(interval); };
-  }, [runSceneAnalysis]);
+  }, [runSceneAnalysis, isPhone]);
 
   const correctFaceRecognition = (object: DetectionObject, name: string) => {
     faceCorrections.current[object.id] = name;
@@ -980,7 +1008,7 @@ export function App() {
       const canvas = canvasRef.current;
       if (canvas) {
         try {
-          const stream = canvas.captureStream(60);
+          const stream = canvas.captureStream(isPhone ? 30 : 60);
           recordedChunksRef.current = [];
           const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
             ? 'video/webm;codecs=vp9'
@@ -1103,7 +1131,7 @@ export function App() {
     (cue.type === 'speech' || cue.type === 'status') && Date.now() - cue.timestamp < 12000
   );
 
-  const captureLiveVideoFrame = (maxWidth = 1920) => {
+  const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 1920) => {
     const video = videoElementRef.current;
     if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
     const width = Math.min(maxWidth, video.videoWidth);
@@ -1123,17 +1151,17 @@ export function App() {
   };
 
   return (
-    <div className={`min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
+    <div className={`app-shell min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
-      {liveAlert && <div role="alert" className="fixed right-4 top-16 z-50 flex items-center gap-2 rounded-xl border border-amber-500/60 bg-amber-950/95 px-4 py-3 text-sm font-semibold text-amber-100 shadow-xl"><AlertTriangle className="h-4 w-4 text-amber-400" />{liveAlert}</div>}
+      {liveAlert && <div role="alert" className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-center gap-2 rounded-xl border border-amber-500/60 bg-amber-950/95 px-4 py-3 text-sm font-semibold text-amber-100 shadow-xl sm:left-auto sm:right-4 sm:top-16 sm:max-w-md"><AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />{liveAlert}</div>}
 
       {/* TOP PERSISTENT NAVIGATION BAR */}
-      <header className="sticky top-0 z-40 bg-slate-950/90 border-b border-slate-800 backdrop-blur-md px-3 sm:px-4 py-2.5 flex items-center justify-between shadow-lg gap-2">
+      <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/90 px-3 py-2.5 shadow-lg backdrop-blur-md sm:flex-nowrap sm:px-4">
         {/* Brand & System Status */}
-        <div className="flex items-center gap-3 shrink-0">
-          <div className="p-2 bg-cyan-950/80 border border-cyan-800 rounded-xl text-cyan-400 shadow-sm shadow-cyan-950">
-            <Shield className="w-5 h-5" />
+        <div className="flex items-center gap-2 shrink-0 sm:gap-3">
+          <div className="rounded-xl border border-cyan-800 bg-cyan-950/80 p-1.5 text-cyan-400 shadow-sm shadow-cyan-950 sm:p-2">
+            <Shield className="h-5 w-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -1143,9 +1171,10 @@ export function App() {
               <span className="hidden sm:inline-flex px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
                 DVR v2.5
               </span>
-              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-800">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                60 FPS LOCAL DSP
+              <span className="inline-flex items-center gap-1.5 rounded border border-emerald-800 bg-emerald-950 px-2 py-0.5 font-mono text-[10px] text-emerald-400">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="min-[390px]:hidden">LIVE</span>
+                <span className="hidden min-[390px]:inline">LOCAL DVR</span>
               </span>
             </div>
             <p className="text-[10px] text-slate-400 font-mono hidden md:block">
@@ -1155,7 +1184,7 @@ export function App() {
         </div>
 
         {/* Action Controls Toolbar - Persistent and Horizontally Scrollable on Mobile & Desktop */}
-        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-1">
+        <div className="flex w-full min-w-0 flex-1 items-center justify-start gap-2 overflow-x-auto py-1 no-scrollbar sm:w-auto sm:justify-end">
           {/* Quick Theme Mode Toggle */}
           <button
             onClick={() => {
@@ -1254,8 +1283,9 @@ export function App() {
       </header>
 
       {/* SUB-HEADER: CAMERA CHANNEL SELECTOR PILLS */}
-      <div className="bg-slate-900/60 border-b border-slate-800/80 px-4 py-2 flex items-center justify-between overflow-x-auto gap-2">
-        <div className="flex items-center gap-2 shrink-0">
+      <div className="border-b border-slate-800/80 bg-slate-900/60 px-3 py-2 overflow-x-auto no-scrollbar sm:px-4">
+        <div className="flex min-w-max items-center gap-3">
+          <div className="flex items-center gap-2 shrink-0">
           <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider hidden sm:inline">
             CHANNELS:
           </span>
@@ -1288,22 +1318,23 @@ export function App() {
         </div>
 
         {/* Quick feature badge */}
-        <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400 shrink-0">
-          <span className="text-cyan-400 font-bold">{fpsDisplay} FPS</span>
-          <span>|</span>
-          <span className="text-emerald-400">100% PRIVATE LOCAL STORE</span>
+          <div className="flex items-center gap-2 font-mono text-[11px] text-slate-400 shrink-0">
+            <span className="text-cyan-400 font-bold">{fpsDisplay} FPS</span>
+            <span>|</span>
+            <span className="text-emerald-400">100% PRIVATE LOCAL STORE</span>
+          </div>
         </div>
       </div>
 
       {/* MAIN VIEWPORT CONTAINER */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 flex flex-col gap-4">
+      <main className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5">
         {/* PRIMARY DVR STAGE & CANVAS */}
-        <div ref={streamStageRef} className="relative w-full aspect-video rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-2xl flex items-center justify-center group fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none">
+        <div ref={streamStageRef} className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none">
           {/* Main 60 FPS Render Canvas */}
           <canvas
             ref={canvasRef}
-            width={1280}
-            height={720}
+            width={isPhone ? 960 : 1280}
+            height={isPhone ? 540 : 720}
             className="w-full h-full object-contain block bg-slate-950"
           />
           {!(videoElementRef.current && videoElementRef.current.readyState >= 2 && videoElementRef.current.videoWidth > 0) && (
@@ -1338,7 +1369,7 @@ export function App() {
               <span className="text-sm">{latestTranscript.label}</span>
             </div>
           )}
-          <div className="absolute bottom-4 right-4 flex items-center gap-2">
+          <div className="absolute bottom-2 right-2 flex items-center gap-1.5 sm:bottom-4 sm:right-4 sm:gap-2">
             <button
               onClick={handleTake4KSnapshot}
               className="rounded-lg border border-white/25 bg-black/70 p-2 text-white hover:bg-black/90"
@@ -1367,20 +1398,22 @@ export function App() {
         </div>
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
-        <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 shadow-xl">
+        <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">
           {/* Recording & Snapshot Actions */}
-          <div className="flex items-center gap-2.5">
+          <div className="flex w-full items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
             <button
               id="record-toggle-btn"
               onClick={handleToggleRecord}
-              className={`px-4 py-2.5 rounded-xl font-mono text-xs font-bold transition flex items-center gap-2 shadow-lg ${
+              className={`shrink-0 rounded-xl px-4 py-2.5 font-mono text-xs font-bold transition flex items-center gap-2 shadow-lg ${
                 isRecordingNow
                   ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse shadow-red-900/50'
                   : 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
               }`}
+              title={isRecordingNow ? 'Stop DVR recording' : 'Record 4K clip'}
+              aria-label={isRecordingNow ? 'Stop DVR recording' : 'Record 4K clip'}
             >
               {isRecordingNow ? <Square className="w-4 h-4" /> : <Play className="w-4 h-4 text-red-500" />}
-              <span>{isRecordingNow ? 'STOP DVR RECORDING' : 'RECORD 4K CLIP'}</span>
+              <span className="hidden sm:inline">{isRecordingNow ? 'STOP DVR RECORDING' : 'RECORD 4K CLIP'}</span>
             </button>
 
             {/* Night Vision Quick Toggle */}
@@ -1390,14 +1423,16 @@ export function App() {
                 setNightVision((prev) => ({ ...prev, enabled: !prev.enabled }));
                 setActivePanel(activePanel === 'night_vision' ? 'none' : 'night_vision');
               }}
-              className={`px-3 py-2 rounded-xl font-mono text-xs font-bold border transition flex items-center gap-1.5 ${
+              className={`shrink-0 rounded-xl border px-3 py-2 font-mono text-xs font-bold transition flex items-center gap-1.5 ${
                 nightVision.enabled
                   ? 'bg-emerald-950 border-emerald-500 text-emerald-300'
                   : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
               }`}
+              title="Open night vision calibration"
+              aria-label="Open night vision calibration"
             >
               <Moon className="w-3.5 h-3.5 text-emerald-400" />
-              <span>NIGHT VISION CALIBRATION</span>
+              <span className="hidden sm:inline">NIGHT VISION CALIBRATION</span>
             </button>
 
             {/* CompreFace Instant Scan & Follow Trigger */}
@@ -1432,11 +1467,12 @@ export function App() {
                   showScanFeedback(`Detected ${dets.length} face${dets.length === 1 ? '' : 's'} in the live frame.`);
                 } else showScanFeedback('No face detected in the live frame. Face the camera with your face clearly visible.');
               }}
-              className="px-3 py-2 rounded-xl font-mono text-xs font-bold border border-cyan-800 bg-cyan-950/70 hover:bg-cyan-900 text-cyan-300 transition flex items-center gap-1.5 shadow-sm"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl border border-cyan-800 bg-cyan-950/70 px-3 py-2 font-mono text-xs font-bold text-cyan-300 shadow-sm transition hover:bg-cyan-900"
               title="Perform instant CompreFace biometric scan and lock target"
+              aria-label="Perform instant CompreFace biometric scan"
             >
               <Users className="w-3.5 h-3.5 text-cyan-400" />
-              <span>COMPREFACE SCAN</span>
+              <span className="hidden sm:inline">COMPREFACE SCAN</span>
             </button>
 
             {/* Instant Real Object Detection Scan */}
@@ -1447,15 +1483,16 @@ export function App() {
                 ...detectionSensitivities,
                 objects: { ...detectionSensitivities.objects, enabled: !detectionSensitivities.objects.enabled },
               })}
-              className={`px-3 py-2 rounded-xl font-mono text-xs font-bold border transition flex items-center gap-1.5 shadow-sm ${
+              className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 font-mono text-xs font-bold shadow-sm transition ${
                 detectionSensitivities.objects.enabled
                   ? 'border-emerald-800 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300'
                   : 'border-slate-700 bg-slate-900 hover:bg-slate-800 text-slate-400'
               }`}
               title="Turn live object, animal, and vehicle detection on or off"
+              aria-label={`Object detection ${detectionSensitivities.objects.enabled ? 'on' : 'off'}`}
             >
               <Zap className="w-3.5 h-3.5" />
-              <span>OBJECT DETECTION {detectionSensitivities.objects.enabled ? 'ON' : 'OFF'}</span>
+              <span className="hidden sm:inline">OBJECT DETECTION {detectionSensitivities.objects.enabled ? 'ON' : 'OFF'}</span>
             </button>
 
             <button
@@ -1487,16 +1524,17 @@ export function App() {
                 }
               }}
               disabled={!detectionSensitivities.objects.enabled}
-              className="px-3 py-2 rounded-xl font-mono text-xs font-bold border border-purple-800 bg-purple-950/70 hover:bg-purple-900 text-purple-300 transition flex items-center gap-1.5 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl border border-purple-800 bg-purple-950/70 px-3 py-2 font-mono text-xs font-bold text-purple-300 shadow-sm transition hover:bg-purple-900 disabled:cursor-not-allowed disabled:opacity-40"
               title="Identify objects, animals, and vehicles in the current frame"
+              aria-label="Identify objects, animals, and vehicles"
             >
               <Zap className="w-3.5 h-3.5 text-purple-400" />
-              <span>IDENTIFY OBJECTS</span>
+              <span className="hidden sm:inline">IDENTIFY OBJECTS</span>
             </button>
           </div>
 
           {/* Auxiliary Panel Toggles */}
-          <div className="flex items-center gap-2">
+          <div className="flex w-full items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
             {/* Wyze PTZ & Two-Way Microphone Audio */}
             {(activeCamera.type === 'wyze' || cameras.some((c) => c.type === 'wyze')) && (
               <button
@@ -1507,60 +1545,65 @@ export function App() {
                   }
                   setActivePanel(activePanel === 'wyze' ? 'none' : 'wyze');
                 }}
-                className={`px-3 py-2 rounded-xl font-mono text-xs border transition flex items-center gap-1.5 ${
+                className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 font-mono text-xs transition ${
                   activePanel === 'wyze'
                     ? 'bg-cyan-950 border-cyan-500 text-cyan-300'
                     : 'bg-slate-950 border-slate-800 text-slate-300 hover:text-white'
                 }`}
                 title="Open Wyze Cam PTZ & Microphone controls"
+                aria-label="Open Wyze PTZ and talk controls"
               >
                 <Compass className="w-3.5 h-3.5 text-cyan-400" />
-                <span>WYZE PTZ & TALK</span>
+                <span className="hidden sm:inline">WYZE PTZ & TALK</span>
               </button>
             )}
 
             {/* Audio Radar */}
             <button
               onClick={() => setActivePanel(activePanel === 'audio_radar' ? 'none' : 'audio_radar')}
-              className={`px-3 py-2 rounded-xl font-mono text-xs border transition flex items-center gap-1.5 ${
+              className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 font-mono text-xs transition ${
                 activePanel === 'audio_radar'
                   ? 'bg-purple-950 border-purple-500 text-purple-300'
                   : 'bg-slate-950 border-slate-800 text-slate-300 hover:text-white'
               }`}
+              aria-label="Toggle acoustic radar"
             >
               <Activity className="w-3.5 h-3.5 text-purple-400" />
-              <span>ACOUSTIC RADAR</span>
+              <span className="hidden sm:inline">ACOUSTIC RADAR</span>
             </button>
 
             {/* Recordings Library */}
             <button
               onClick={() => setActivePanel(activePanel === 'recordings' ? 'none' : 'recordings')}
-              className={`px-3 py-2 rounded-xl font-mono text-xs border transition flex items-center gap-1.5 ${
+              className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 font-mono text-xs transition ${
                 activePanel === 'recordings'
                   ? 'bg-blue-950 border-blue-500 text-blue-300'
                   : 'bg-slate-950 border-slate-800 text-slate-300 hover:text-white'
               }`}
+              aria-label={`Open DVR clips, ${recordings.length} saved`}
             >
               <Film className="w-3.5 h-3.5 text-blue-400" />
-              <span>DVR CLIPS ({recordings.length})</span>
+              <span className="hidden sm:inline">DVR CLIPS ({recordings.length})</span>
             </button>
 
             <button
               onClick={() => setActivePanel(activePanel === 'history' ? 'none' : 'history')}
-              className={`px-3 py-2 rounded-xl font-mono text-xs border transition flex items-center gap-1.5 ${activePanel === 'history' ? 'bg-cyan-950 border-cyan-500 text-cyan-300' : 'bg-slate-950 border-slate-800 text-slate-300 hover:text-white'}`}
+              className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-3 py-2 font-mono text-xs transition ${activePanel === 'history' ? 'bg-cyan-950 border-cyan-500 text-cyan-300' : 'bg-slate-950 border-slate-800 text-slate-300 hover:text-white'}`}
               title="View saved camera events"
+              aria-label={`View camera history, ${historyEvents.length} events`}
             >
               <HistoryIcon className="w-3.5 h-3.5 text-cyan-400" />
-              <span>HISTORY ({historyEvents.length})</span>
+              <span className="hidden sm:inline">HISTORY ({historyEvents.length})</span>
             </button>
 
             {/* Deep Scene Analysis Drawer Toggle */}
             <button
               onClick={() => setShowSceneDrawer(true)}
-              className="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-mono text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-purple-950/40"
+              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-purple-600 px-3.5 py-2 font-mono text-xs font-bold text-white shadow-md shadow-purple-950/40 transition hover:bg-purple-500"
+              aria-label="Open scene details"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>SCENE DETAILS</span>
+              <span className="hidden sm:inline">SCENE DETAILS</span>
             </button>
           </div>
         </div>
@@ -1631,7 +1674,7 @@ export function App() {
       </main>
 
       {/* FOOTER */}
-      <footer className="mt-auto border-t border-slate-800 bg-slate-950 px-6 py-4 text-center text-xs font-mono text-slate-500 flex flex-col sm:flex-row items-center justify-between gap-2">
+      <footer className="mt-auto flex flex-col items-center justify-between gap-2 border-t border-slate-800 bg-slate-950 px-3 py-4 text-center font-mono text-[11px] text-slate-500 sm:flex-row sm:px-6 sm:text-xs">
         <div className="flex items-center gap-2 text-slate-400">
           <Shield className="w-4 h-4 text-cyan-400" />
           <span>Lookout AI • Next-Gen PWA Surveillance Hub</span>

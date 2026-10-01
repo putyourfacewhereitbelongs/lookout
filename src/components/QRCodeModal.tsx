@@ -84,8 +84,8 @@ export const QRCodeModal: React.FC<QRCodeModalProps> = ({ isOpen, onClose, urlTo
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-      <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700/80 p-6 shadow-2xl text-slate-100 relative">
+    <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
+      <div className="mobile-dialog relative w-full max-w-md overflow-y-auto rounded-2xl border border-slate-700/80 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:p-6">
         <button
           onClick={onClose}
           className="absolute top-4 right-4 p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition"
@@ -108,7 +108,7 @@ export const QRCodeModal: React.FC<QRCodeModalProps> = ({ isOpen, onClose, urlTo
           <div className="bg-white p-4 rounded-xl shadow-lg">
             <svg
               viewBox="0 0 25 25"
-              className="w-48 h-48 block"
+              className="block h-40 w-40 sm:h-48 sm:w-48"
               shapeRendering="crispEdges"
             >
               {matrix.map((row, y) =>

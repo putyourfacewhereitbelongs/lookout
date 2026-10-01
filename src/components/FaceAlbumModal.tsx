@@ -155,22 +155,22 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fade-in">
-      <div className="w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl text-slate-100 overflow-hidden">
+    <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
+      <div className="mobile-dialog flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 text-slate-100 shadow-2xl">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/60">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-950/60 px-3 py-3 sm:px-6 sm:py-4">
+          <div className="min-w-0 flex items-center gap-2 sm:gap-3">
             <div className="p-2.5 bg-cyan-950 border border-cyan-800 rounded-xl text-cyan-400">
               <Users className="w-6 h-6" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-lg font-bold text-white">Biometric Face & Animal Intelligence</h2>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950 text-cyan-400 border border-cyan-800">
+                <h2 className="truncate text-sm font-bold text-white sm:text-lg">Biometric Face & Animal Intelligence</h2>
+                <span className="hidden rounded border border-cyan-800 bg-cyan-950 px-2 py-0.5 font-mono text-[10px] text-cyan-400 sm:inline">
                   OFFLINE NEURAL CLUSTERING
                 </span>
               </div>
-              <p className="text-xs text-slate-400 font-mono">
+              <p className="hidden text-xs font-mono text-slate-400 sm:block">
                 Stores face profiles and animal reference photos separately; CompreFace enrollment is for people.
               </p>
             </div>
@@ -184,8 +184,8 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-6 bg-slate-950/30">
-          <div className="flex gap-4">
+        <div className="flex items-center gap-3 overflow-x-auto border-b border-slate-800 bg-slate-950/30 px-3 no-scrollbar sm:px-6">
+          <div className="flex shrink-0 gap-3 sm:gap-4">
             <button
               onClick={() => setActiveTab('unknown')}
               className={`flex items-center gap-2 py-3 border-b-2 font-mono text-xs font-semibold transition ${
@@ -195,7 +195,8 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
               }`}
             >
               <HelpCircle className="w-4 h-4" />
-              UNKNOWN GROUPINGS ({unknownProfiles.length})
+              <span className="sm:hidden">UNKNOWN ({unknownProfiles.length})</span>
+              <span className="hidden sm:inline">UNKNOWN GROUPINGS ({unknownProfiles.length})</span>
               {unknownProfiles.length > 0 && (
                 <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
               )}
@@ -210,23 +211,26 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
               }`}
             >
               <UserCheck className="w-4 h-4" />
-              VERIFIED PROFILES ({knownProfiles.length})
+              <span className="sm:hidden">KNOWN ({knownProfiles.length})</span>
+              <span className="hidden sm:inline">VERIFIED PROFILES ({knownProfiles.length})</span>
             </button>
           </div>
 
           <button
             onClick={handleSyncCompreFace}
             disabled={isSyncing}
-            className="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-cyan-300 font-mono text-[11px] font-bold transition flex items-center gap-1.5 shadow-sm"
+            className="flex shrink-0 items-center gap-1.5 rounded border border-slate-700 bg-slate-900 px-2.5 py-1 font-mono text-[11px] font-bold text-cyan-300 shadow-sm transition hover:bg-slate-800"
             title="Sync registered subjects from CompreFace neural server"
+            aria-label="Sync CompreFace subjects"
           >
             <RefreshCw className={`w-3 h-3 ${isSyncing ? 'animate-spin' : ''}`} />
-            <span>{isSyncing ? 'SYNCING...' : 'SYNC COMPREFACE'}</span>
+            <span className="sm:hidden">SYNC</span>
+            <span className="hidden sm:inline">{isSyncing ? 'SYNCING...' : 'SYNC COMPREFACE'}</span>
           </button>
         </div>
 
         {/* Content Body */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar">
+        <div className="min-h-0 flex-1 overflow-y-auto space-y-4 p-3 custom-scrollbar sm:p-6">
           {activeTab === 'unknown' ? (
             <div>
               <div className="p-3 mb-4 rounded-xl bg-amber-950/30 border border-amber-800/50 text-xs font-mono text-amber-300/90 flex items-center justify-between">
@@ -357,8 +361,8 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
 
         {/* Naming / Editing Sub-Modal Dialog */}
         {editingProfile && (
-          <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-            <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-700 p-6 shadow-2xl text-slate-100">
+          <div className="mobile-overlay fixed inset-0 z-60 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+            <div className="mobile-dialog max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:p-6">
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-cyan-400" />
@@ -420,7 +424,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                   </div>
                 )}
 
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <div>
                     <label className="block text-slate-400 mb-1">Entity Type</label>
                     <select
