@@ -176,12 +176,14 @@ export class FaceRecognitionService {
       const targetW = Math.min(1 - targetX, fw * 1.16);
       const targetH = Math.min(1 - targetY, fh * 1.20);
       const targetBbox: [number, number, number, number] = [targetX, targetY, targetW, targetH];
-      // The HUD remains head-sized; segmentation gets more surrounding pixels
-      // so it can trace the person's visible head and upper body from the frame.
-      const silhouetteX = clamp(fx - fw * 0.75);
-      const silhouetteY = clamp(fy - fh * 0.14);
-      const silhouetteW = Math.min(1 - silhouetteX, fw * 2.5);
-      const silhouetteH = Math.min(1 - silhouetteY, fh * 4.2);
+      // The HUD remains head-sized. Semantic segmentation gets a generous
+      // person-sized crop so it can retain the visible body, arms, and legs.
+      // This is input context only: the renderer never displays this rectangle
+      // unless the segmentation model returns actual subject pixels.
+      const silhouetteX = clamp(fx - fw * 1.10);
+      const silhouetteY = clamp(fy - fh * 0.32);
+      const silhouetteW = Math.min(1 - silhouetteX, fw * 3.20);
+      const silhouetteH = Math.min(1 - silhouetteY, fh * 9.00);
       const targetSilhouetteBbox: [number, number, number, number] = [silhouetteX, silhouetteY, silhouetteW, silhouetteH];
 
       // Normalize facial landmarks (5 points)
