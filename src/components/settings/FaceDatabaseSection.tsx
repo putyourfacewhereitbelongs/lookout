@@ -402,12 +402,12 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
             </span>
           </div>
           <p className="text-[10px] text-slate-400">
-            Minimum visual embedding similarity required to confirm a face matches a known profile.
+            Minimum visual embedding similarity required to confirm a face. One sharp HD enrollment photo is supported; a competing identity must still be clearly behind it.
           </p>
           <input
             type="range"
-            min="0.85"
-            max="0.99"
+            min="0.80"
+            max="0.98"
             step="0.01"
             value={storagePreferences.faceMatchThreshold}
             onChange={(e) =>
@@ -419,9 +419,9 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
             className="w-full accent-cyan-500 cursor-pointer"
           />
           <div className="flex justify-between text-[9px] text-slate-500">
-            <span>85% (Sensitive)</span>
-            <span>92% (Balanced)</span>
-            <span>99% (Strict)</span>
+            <span>80% (One photo)</span>
+            <span>84% (Balanced)</span>
+            <span>98% (Strict)</span>
           </div>
         </div>
 

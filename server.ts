@@ -14,7 +14,10 @@ const app = express();
 const requestedPort = Number.parseInt(process.env.PORT || '3000', 10);
 const PORT = Number.isInteger(requestedPort) && requestedPort > 0 ? requestedPort : 3000;
 
-app.use(express.json({ limit: '10mb' }));
+// Full-HD JPEG frames and enrollment references are intentionally larger than
+// the old 640px samples. Keep enough request headroom without accepting
+// unbounded uploads.
+app.use(express.json({ limit: '20mb' }));
 
 // Helper to determine network IP for camera casting
 function getLocalNetworkIp(): string {
