@@ -388,19 +388,39 @@ export class VideoProcessor {
       // current emotion cue. Animal names use the same treatment.
       const label = item.label || item.nameTag || item.subjectName || 'UNKNOWN';
 
+      // Crisp double-line head box with corner brackets. The inner line makes
+      // the face boundary readable even over bright or moving backgrounds.
+      ctx.shadowColor = color;
+      ctx.shadowBlur = item.category === 'person' || item.category === 'animal' ? 8 : 0;
       ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = item.category === 'person' || item.category === 'animal' ? 2.5 : 1.5;
       ctx.setLineDash([]);
       ctx.strokeRect(x, y, w, h);
+      ctx.shadowBlur = 0;
+      if (item.category === 'person' || item.category === 'animal') {
+        const corner = Math.max(8, Math.min(18, Math.round(Math.min(w, h) * 0.18)));
+        ctx.lineWidth = 4;
+        for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]] as const) {
+          ctx.beginPath();
+          ctx.moveTo(cx, cy + sy * corner);
+          ctx.lineTo(cx, cy);
+          ctx.lineTo(cx + sx * corner, cy);
+          ctx.stroke();
+        }
+      }
 
       ctx.font = 'bold 12px sans-serif';
-      const labelWidth = Math.min(width, Math.max(ctx.measureText(label).width + 16, 64));
+      const labelWidth = Math.min(width - 4, Math.max(ctx.measureText(label).width + 16, 96));
       const labelX = Math.max(0, Math.min(width - labelWidth, x));
-      const labelY = y >= 24 ? y - 22 : Math.max(0, Math.min(height - 20, y + h + 2));
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-      ctx.fillRect(labelX, labelY, labelWidth, 20);
+      const labelHeight = 24;
+      const labelY = y >= labelHeight + 2 ? y - labelHeight - 2 : Math.min(height - labelHeight, y + h + 4);
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.84)';
+      ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(labelX, labelY, labelWidth, labelHeight);
       ctx.fillStyle = color;
-      ctx.fillText(label, labelX + 8, Math.max(14, labelY + 14), labelWidth - 12);
+      ctx.fillText(label, labelX + 8, labelY + 16, labelWidth - 14);
     });
     ctx.restore();
   }

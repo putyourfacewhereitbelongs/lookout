@@ -448,7 +448,9 @@ export function App() {
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
         const offscreen = document.createElement('canvas');
         recognitionCanvas = offscreen;
-        const maximumWidth = 640;
+        // Keep recognition detailed enough for small faces while staying below
+        // the expensive full-resolution camera frame.
+        const maximumWidth = isPhone ? 960 : 1280;
         snapW = Math.min(maximumWidth, video.videoWidth);
         snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
         offscreen.width = snapW;
@@ -458,7 +460,7 @@ export function App() {
           ctx.imageSmoothingEnabled = true;
           ctx.imageSmoothingQuality = 'high';
           ctx.drawImage(video, 0, 0, snapW, snapH);
-          snapshotBase64 = offscreen.toDataURL('image/jpeg', 0.72);
+          snapshotBase64 = offscreen.toDataURL('image/jpeg', isPhone ? 0.82 : 0.90);
         }
       }
 
@@ -741,18 +743,24 @@ export function App() {
 
   // Export 4K Forensic Master Snapshot
   const handleTake4KSnapshot = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const displayCanvas = canvasRef.current;
+    const video = videoElementRef.current;
+    if (!displayCanvas) return;
 
-    // Create virtual 4K canvas (3840x2160) for forensic export
+    // Prefer native camera pixels for the still. The display canvas is an HD
+    // presentation surface, not the source image, so exporting it would soften
+    // a high-resolution camera unnecessarily.
+    const source = video && video.readyState >= 2 && video.videoWidth > 0 ? video : displayCanvas;
+    const sourceWidth = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
+    const sourceHeight = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
     const k4Canvas = document.createElement('canvas');
     k4Canvas.width = 3840;
-    k4Canvas.height = 2160;
+    k4Canvas.height = Math.round(3840 * sourceHeight / Math.max(1, sourceWidth));
     const ctx = k4Canvas.getContext('2d');
     if (ctx) {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(canvas, 0, 0, 3840, 2160);
+      ctx.drawImage(source, 0, 0, k4Canvas.width, k4Canvas.height);
 
       const link = document.createElement('a');
       link.download = `LOOKOUT_4K_${Date.now()}.png`;
@@ -995,11 +1003,11 @@ export function App() {
       <main className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5">
         {/* PRIMARY DVR STAGE & CANVAS */}
         <div ref={streamStageRef} className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none">
-          {/* Low-CPU 30 FPS Render Canvas */}
+          {/* HD 30 FPS Render Canvas; source video remains native-resolution for exports */}
           <canvas
             ref={canvasRef}
-            width={960}
-            height={540}
+            width={1920}
+            height={1080}
             className="w-full h-full object-contain block bg-slate-950"
           />
           {!(videoElementRef.current && videoElementRef.current.readyState >= 2 && videoElementRef.current.videoWidth > 0) && (
