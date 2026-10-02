@@ -5,8 +5,7 @@ FROM node:22-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-# The browser bundle uses onnxruntime-web. Skipping lifecycle scripts avoids
-# downloading the unused native onnxruntime-node binary during image builds.
+# No native ML runtime is needed in the Lookout container; recognition runs in CompreFace.
 RUN npm ci --ignore-scripts
 
 COPY . .

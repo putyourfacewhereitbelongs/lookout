@@ -1,6 +1,6 @@
 # Lookout AI
 
-Lookout is a camera-monitoring web app with real-time face recognition through [Exadel CompreFace](https://github.com/exadel-inc/CompreFace). This repository includes a Docker Compose stack that starts Lookout and the complete self-hosted CompreFace service together.
+Lookout is a camera-monitoring web app with low-latency face recognition through [Exadel CompreFace](https://github.com/exadel-inc/CompreFace). This repository includes a Docker Compose stack that starts Lookout and the complete self-hosted CompreFace service together.
 
 ## Start the full stack
 
@@ -84,9 +84,14 @@ All optional settings are documented in [`.env.example`](.env.example). Docker C
 | `COMPREFACE_BIND_ADDRESS` | `127.0.0.1` | Host interface for the CompreFace admin UI. Do not expose it publicly without access controls. |
 | `COMPREFACE_POSTGRES_PASSWORD` | `postgres` | Database password for a new local CompreFace installation. Set a strong value **before the first launch**. |
 | `LOOKOUT_COMPREFACE_URL` | `http://compreface-ui` | Advanced override for the CompreFace URL as seen by the Lookout container. |
-| `GROQ_API_KEY` | empty | Optional key for Lookout's separate Groq-backed scene/object analysis. |
 
 The CompreFace images are pinned to upstream version `1.2.0` and follow its [official multi-service Compose architecture](https://github.com/exadel-inc/CompreFace/blob/master/docker-compose.yml). The database, API, admin, ML core, and UI remain on the internal Docker network; only the Lookout and CompreFace UI ports are published.
+
+## Low-CPU recognition mode
+
+Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends a compact 640-pixel JPEG to CompreFace one request at a time and renders overlays at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.
+
+The bundled CompreFace defaults use one ML worker and reduced Java heap limits. Override `COMPREFACE_UWSGI_PROCESSES`, `COMPREFACE_API_JAVA_OPTS`, or `COMPREFACE_ADMIN_JAVA_OPTS` only on machines with more CPU and memory.
 
 ## Local development without the Lookout container
 

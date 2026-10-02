@@ -336,25 +336,6 @@ export class FaceRecognitionService {
   }
 
   /**
-   * Calls the server's vision-backed object detection endpoint.
-   */
-  async detectObjects(imageBase64: string): Promise<DetectionObject[]> {
-    try {
-      const res = await fetch('/api/vision/detect-objects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 }),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return Array.isArray(data.objects) ? data.objects : [];
-    } catch (err) {
-      console.warn('Real object detection error:', err);
-      return [];
-    }
-  }
-
-  /**
    * Correlates CompreFace detections with currently tracked objects.
    * Generates or updates bounding boxes, normalized landmarks, and identification labels.
    */

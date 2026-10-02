@@ -78,7 +78,7 @@ export default defineConfig(() => {
           id: '/',
           name: 'Lookout AI DVR & Vision Security',
           short_name: 'Lookout AI',
-          description: 'Advanced AI DVR with real-time multi-camera detection, facial & animal recognition, colored night vision, 60fps thermal silhouette tracking, and audio surveillance.',
+          description: 'Low-CPU camera monitor with fast, private face recognition through self-hosted CompreFace.',
           theme_color: '#090d16',
           background_color: '#090d16',
           display: 'standalone',
