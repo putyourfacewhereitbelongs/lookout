@@ -15,7 +15,6 @@ services:
       # Use LOOKOUT_COMPREFACE_URL only when intentionally targeting another host.
       COMPREFACE_URL: "${LOOKOUT_COMPREFACE_URL:-http://compreface-ui}"
       COMPREFACE_API_KEY: "${COMPREFACE_API_KEY:-}"
-      GROQ_API_KEY: "${GROQ_API_KEY:-}"
     depends_on:
       compreface-ui:
         condition: service_started
@@ -44,7 +43,7 @@ services:
     environment:
       ML_PORT: 3000
       IMG_LENGTH_LIMIT: "${COMPREFACE_MAX_DETECT_SIZE:-640}"
-      UWSGI_PROCESSES: "${COMPREFACE_UWSGI_PROCESSES:-2}"
+      UWSGI_PROCESSES: "${COMPREFACE_UWSGI_PROCESSES:-1}"
       UWSGI_THREADS: "${COMPREFACE_UWSGI_THREADS:-1}"
     healthcheck:
       test: ["CMD-SHELL", "curl --fail http://localhost:3000/healthcheck || exit 1"]
@@ -61,7 +60,7 @@ services:
       POSTGRES_PASSWORD: "${COMPREFACE_POSTGRES_PASSWORD:-postgres}"
       POSTGRES_URL: "jdbc:postgresql://compreface-postgres-db:5432/${COMPREFACE_POSTGRES_DB:-frs}"
       SPRING_PROFILES_ACTIVE: dev
-      API_JAVA_OPTS: "${COMPREFACE_API_JAVA_OPTS:--Xmx4g}"
+      API_JAVA_OPTS: "${COMPREFACE_API_JAVA_OPTS:--Xms256m -Xmx1g}"
       SAVE_IMAGES_TO_DB: "${COMPREFACE_SAVE_IMAGES_TO_DB:-true}"
       MAX_FILE_SIZE: "${COMPREFACE_MAX_FILE_SIZE:-5MB}"
       MAX_REQUEST_SIZE: "${COMPREFACE_MAX_REQUEST_SIZE:-10M}B"
@@ -82,7 +81,7 @@ services:
       POSTGRES_URL: "jdbc:postgresql://compreface-postgres-db:5432/${COMPREFACE_POSTGRES_DB:-frs}"
       SPRING_PROFILES_ACTIVE: dev
       ENABLE_EMAIL_SERVER: "false"
-      ADMIN_JAVA_OPTS: "${COMPREFACE_ADMIN_JAVA_OPTS:--Xmx1g}"
+      ADMIN_JAVA_OPTS: "${COMPREFACE_ADMIN_JAVA_OPTS:--Xms128m -Xmx512m}"
       MAX_FILE_SIZE: "${COMPREFACE_MAX_FILE_SIZE:-5MB}"
       MAX_REQUEST_SIZE: "${COMPREFACE_MAX_REQUEST_SIZE:-10M}B"
     depends_on:
