@@ -511,24 +511,52 @@ export function App() {
             } else {
               let faceCrop: string | undefined;
               if (recognitionCanvas && d.box) {
+                // Recognition intentionally uses a compact frame, but the saved
+                // snapshot should come from the camera's native pixels. The old
+                // 192px crop was both soft and stretched when a face box was not
+                // square. Build a padded square in recognition coordinates, map
+                // it back to the native video, and only then upscale it to a
+                // consistent HD-ish profile image.
                 const faceWidth = d.box.x_max - d.box.x_min;
                 const faceHeight = d.box.y_max - d.box.y_min;
-                const paddingX = faceWidth * 0.2;
-                const paddingY = faceHeight * 0.2;
-                const sx = Math.max(0, Math.floor(d.box.x_min - paddingX));
-                const sy = Math.max(0, Math.floor(d.box.y_min - paddingY));
-                const ex = Math.min(snapW, Math.ceil(d.box.x_max + paddingX));
-                const ey = Math.min(snapH, Math.ceil(d.box.y_max + paddingY));
-                const cropWidth = ex - sx;
-                const cropHeight = ey - sy;
-                if (cropWidth > 0 && cropHeight > 0) {
+                const paddingX = faceWidth * 0.28;
+                const paddingY = faceHeight * 0.28;
+                const paddedWidth = faceWidth + paddingX * 2;
+                const paddedHeight = faceHeight + paddingY * 2;
+                const squareSize = Math.max(paddedWidth, paddedHeight);
+                const centerX = (d.box.x_min + d.box.x_max) / 2;
+                const centerY = (d.box.y_min + d.box.y_max) / 2;
+                const sx = Math.max(0, Math.min(snapW - squareSize, centerX - squareSize / 2));
+                const sy = Math.max(0, Math.min(snapH - squareSize, centerY - squareSize / 2));
+                const cropSize = Math.min(squareSize, snapW - sx, snapH - sy);
+                if (cropSize > 0) {
+                  const source = video && video.videoWidth > 0 ? video : recognitionCanvas;
+                  const sourceWidth = source === video ? video.videoWidth : snapW;
+                  const sourceHeight = source === video ? video.videoHeight : snapH;
+                  const scaleX = sourceWidth / snapW;
+                  const scaleY = sourceHeight / snapH;
                   const cropCanvas = document.createElement('canvas');
-                  cropCanvas.width = 192;
-                  cropCanvas.height = 192;
+                  // A 1024px square keeps the profile sharp on HD/retina
+                  // displays, while the native video remains the source of truth.
+                  const outputSize = 1024;
+                  cropCanvas.width = outputSize;
+                  cropCanvas.height = outputSize;
                   const cropContext = cropCanvas.getContext('2d');
                   if (cropContext) {
-                    cropContext.drawImage(recognitionCanvas, sx, sy, cropWidth, cropHeight, 0, 0, 192, 192);
-                    faceCrop = cropCanvas.toDataURL('image/jpeg', 0.88);
+                    cropContext.imageSmoothingEnabled = true;
+                    cropContext.imageSmoothingQuality = 'high';
+                    cropContext.drawImage(
+                      source,
+                      sx * scaleX,
+                      sy * scaleY,
+                      cropSize * scaleX,
+                      cropSize * scaleY,
+                      0,
+                      0,
+                      outputSize,
+                      outputSize
+                    );
+                    faceCrop = cropCanvas.toDataURL('image/jpeg', 0.94);
                   }
                 }
               }
