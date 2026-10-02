@@ -140,6 +140,7 @@ export function App() {
   const streamStageRef = useRef<HTMLDivElement | null>(null);
   const [isRecordingNow, setIsRecordingNow] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingSceneDescription, setRecordingSceneDescription] = useState('');
   const [fpsDisplay, setFpsDisplay] = useState(60);
 
   // References
@@ -209,6 +210,17 @@ export function App() {
     updateDeviceMode();
     mediaQuery.addEventListener?.('change', updateDeviceMode);
     return () => mediaQuery.removeEventListener?.('change', updateDeviceMode);
+  }, []);
+
+  // Restore video bytes from IndexedDB after the lightweight recording metadata
+  // has loaded from localStorage. Object URLs are session-only, so this is what
+  // makes DVR clips playable after a page reload.
+  useEffect(() => {
+    let active = true;
+    StorageService.hydrateRecordings(StorageService.getRecordings()).then((saved) => {
+      if (active) setRecordings(saved);
+    });
+    return () => { active = false; };
   }, []);
 
   // Save changes to local database
@@ -602,6 +614,17 @@ export function App() {
     return () => clearInterval(interval);
   }, [isRecordingNow]);
 
+  const buildSceneDescription = () => {
+    const visibleSubjects = detectedObjects
+      .map((object) => object.subjectName || object.nameTag || object.label)
+      .filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .slice(0, 8);
+    return visibleSubjects.length > 0
+      ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
+      : `${activeCamera.name}: live camera scene`;
+  };
+
   // Handle Recording Toggle (captures the lightweight 30 FPS display stream)
   const handleToggleRecord = () => {
     if (!isRecordingNow) {
@@ -635,33 +658,41 @@ export function App() {
       const canvas = canvasRef.current;
       const thumb = canvas ? canvas.toDataURL('image/jpeg', 0.8) : '';
 
-      const saveClip = (finalUrl: string, finalSize: number) => {
+      const saveClip = (finalUrl: string, finalSize: number, blob?: Blob) => {
+        const sceneDescription = recordingSceneDescription.trim() || buildSceneDescription();
         const newRec: SavedRecording = {
           id: `rec-${Date.now()}`,
-          title: `Lookout DVR Incident ${new Date().toLocaleTimeString()}`,
+          title: sceneDescription,
+          sceneDescription,
           timestamp: Date.now(),
           durationSeconds: Math.max(1, recordingSeconds),
           resolution: '4K',
           blobUrl: finalUrl,
           thumbnail: thumb,
-          sizeBytes: finalSize || Math.floor(recordingSeconds * 4200000 + 1024 * 512),
+          sizeBytes: finalSize,
           cameraName: activeCamera.name,
-          tags: ['DVR Event', 'Telemetry Burn', '30 FPS'],
+          tags: ['DVR Event', 'Telemetry Burn', '30 FPS', 'Scene Description'],
         };
-        StorageService.saveRecording(newRec);
-        setRecordings(StorageService.getRecordings());
-        audioEngine.speakSceneDescription('DVR clip saved to local encrypted vault.');
+        StorageService.saveRecording(newRec, blob);
+        // Keep the live object URL for immediate playback; IndexedDB stores the
+        // durable copy used to restore it after reload.
+        setRecordings((previous) => [newRec, ...previous].slice(0, 50));
+        audioEngine.speakSceneDescription(`DVR clip saved: ${sceneDescription}`);
       };
 
       if (recorder && recorder.state !== 'inactive') {
         recorder.onstop = () => {
-          const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+          const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'video/webm' });
+          if (blob.size === 0) {
+            audioEngine.speakSceneDescription('DVR could not save a video because the recorder returned no data.');
+            return;
+          }
           const videoUrl = URL.createObjectURL(blob);
-          saveClip(videoUrl, blob.size);
+          saveClip(videoUrl, blob.size, blob);
         };
         recorder.stop();
       } else {
-        saveClip(thumb, 0);
+        audioEngine.speakSceneDescription('DVR is unavailable: no video recorder stream was created.');
       }
     }
   };
@@ -967,6 +998,17 @@ export function App() {
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
         <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">
+          <label className="flex min-w-0 flex-col gap-1 font-mono text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            Free scene description <span className="font-normal normal-case tracking-normal text-cyan-400">Unlimited — used as the DVR filename and label</span>
+            <textarea
+              value={recordingSceneDescription}
+              onChange={(event) => setRecordingSceneDescription(event.target.value)}
+              placeholder="Describe this scene before recording, or leave blank for automatic scene labeling…"
+              rows={2}
+              className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-sans text-sm font-normal normal-case tracking-normal text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-500"
+              aria-label="Free unlimited scene description for the next DVR recording"
+            />
+          </label>
           {/* Recording & Snapshot Actions */}
           <div className="flex w-full items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
             <button

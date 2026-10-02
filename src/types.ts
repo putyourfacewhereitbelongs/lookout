@@ -311,10 +311,14 @@ export interface AudioVisualCue {
 export interface SavedRecording {
   id: string;
   title: string;
+  /** Unlimited user-authored or generated context for the captured scene. */
+  sceneDescription?: string;
   timestamp: number;
   durationSeconds: number;
   resolution: '1080p' | '4K' | '8K Super-Res';
   blobUrl: string;
+  /** IndexedDB key for the durable video bytes. */
+  blobKey?: string;
   thumbnail: string;
   sizeBytes?: number;
   cameraName: string;
