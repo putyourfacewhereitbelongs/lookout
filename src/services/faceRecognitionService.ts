@@ -1,4 +1,4 @@
-import { CompreFaceDetection, DetectionObject } from '../types';
+import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
 
 const PERSON_TRACK_RETENTION_MS = 2200;
 const LONG_RANGE_TILE_COLUMNS = 3;
@@ -39,6 +39,56 @@ function inferredEmotion(detection: CompreFaceDetection): 'neutral' | 'alert' | 
   const yaw = Math.abs(detection.pose?.yaw || 0);
   const pitch = Math.abs(detection.pose?.pitch || 0);
   return yaw > 24 || pitch > 18 ? 'alert' : 'neutral';
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/** Build a stable body skeleton from the detected head/silhouette geometry. If
+ * a future pose provider returns real body points, those can replace this
+ * geometry without changing the HUD or tracking model. */
+function estimateBodyLandmarks(
+  targetBbox: [number, number, number, number],
+  silhouetteBbox: [number, number, number, number],
+  previousTarget?: [number, number, number, number],
+): { landmarks: BodyLandmark[]; posture: BodyPosture } {
+  const [x, y, w, h] = targetBbox;
+  const [sx, sy, sw, sh] = silhouetteBbox;
+  const cx = x + w / 2;
+  const shoulderY = clamp01(y + h * 1.35);
+  const hipY = clamp01(sy + sh * 0.48);
+  const kneeY = clamp01(sy + sh * 0.72);
+  const ankleY = clamp01(sy + sh * 0.96);
+  const shoulderOffset = Math.max(w * 0.85, sw * 0.18);
+  const hipOffset = Math.max(w * 0.55, sw * 0.13);
+  const elbowDrop = Math.max(h * 1.1, (hipY - shoulderY) * 0.45);
+  const leftShoulder = [clamp01(cx - shoulderOffset), shoulderY];
+  const rightShoulder = [clamp01(cx + shoulderOffset), shoulderY];
+  const leftHip = [clamp01(cx - hipOffset), hipY];
+  const rightHip = [clamp01(cx + hipOffset), hipY];
+  const leftKnee = [clamp01(cx - hipOffset * 0.95), kneeY];
+  const rightKnee = [clamp01(cx + hipOffset * 0.95), kneeY];
+  const motion = previousTarget
+    ? Math.hypot((x + w / 2) - (previousTarget[0] + previousTarget[2] / 2), (y + h / 2) - (previousTarget[1] + previousTarget[3] / 2))
+    : 0;
+  const aspect = sh / Math.max(0.01, sw);
+  const posture: BodyPosture = motion > 0.018 ? 'walking' : aspect < 1.65 ? 'sitting' : 'standing';
+  const point = (name: BodyLandmark['name'], pair: number[], confidence = 0.62): BodyLandmark => ({ name, x: pair[0], y: pair[1], confidence });
+  return {
+    posture,
+    landmarks: [
+      point('head', [cx, y + h * 0.25], 0.95), point('neck', [cx, y + h * 1.08], 0.78),
+      point('left_shoulder', leftShoulder), point('right_shoulder', rightShoulder),
+      point('left_elbow', [clamp01(leftShoulder[0] - w * 0.55), clamp01(shoulderY + elbowDrop)]),
+      point('right_elbow', [clamp01(rightShoulder[0] + w * 0.55), clamp01(shoulderY + elbowDrop)]),
+      point('left_wrist', [clamp01(leftShoulder[0] - w * 0.7), clamp01(shoulderY + elbowDrop * 1.6)]),
+      point('right_wrist', [clamp01(rightShoulder[0] + w * 0.7), clamp01(shoulderY + elbowDrop * 1.6)]),
+      point('left_hip', leftHip), point('right_hip', rightHip),
+      point('left_knee', leftKnee), point('right_knee', rightKnee),
+      point('left_ankle', [clamp01(leftKnee[0]), ankleY]), point('right_ankle', [clamp01(rightKnee[0]), ankleY]),
+    ],
+  };
 }
 
 function boxIntersectionOverUnion(a: CompreFaceDetection, b: CompreFaceDetection): number {
@@ -464,6 +514,7 @@ export class FaceRecognitionService {
         // Update existing tracked person
         matchedPersonIds.add(bestMatch.id);
         const previousTarget = bestMatch.targetBbox || bestMatch.bbox;
+        const bodyPose = estimateBodyLandmarks(targetBbox, targetSilhouetteBbox, previousTarget);
         const sameKnownIdentity = isRecognized && bestMatch.isKnown && bestMatch.subjectName === subjectName;
         const measurementWeight = sameKnownIdentity ? 0.68 : 0.55;
         bestMatch.targetBbox = targetBbox.map((value, index) =>
@@ -483,6 +534,8 @@ export class FaceRecognitionService {
         bestMatch.age = d.age;
         bestMatch.gender = d.gender;
         bestMatch.emotion = inferredEmotion(d);
+        bestMatch.bodyLandmarks = bodyPose.landmarks;
+        bestMatch.posture = bodyPose.posture;
         bestMatch.pose = d.pose;
         bestMatch.landmarks = normLandmarks;
         bestMatch.lastSeenTime = now;
@@ -490,6 +543,7 @@ export class FaceRecognitionService {
         // Spawn newly identified tracked person
         const newId = `${category}-cf-${now}-${detIdx}`;
         matchedPersonIds.add(newId);
+        const bodyPose = estimateBodyLandmarks(targetBbox, targetSilhouetteBbox);
         existingPersons.push({
           id: newId,
           label,
@@ -509,6 +563,8 @@ export class FaceRecognitionService {
           age: d.age,
           gender: d.gender,
           emotion: inferredEmotion(d),
+          bodyLandmarks: bodyPose.landmarks,
+          posture: bodyPose.posture,
           pose: d.pose,
           landmarks: normLandmarks,
           similarity: topSubject?.similarity,

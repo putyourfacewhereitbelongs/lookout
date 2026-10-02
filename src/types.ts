@@ -103,6 +103,15 @@ export interface CompreFacePose {
   yaw: number;
 }
 
+export type BodyPosture = 'sitting' | 'standing' | 'walking' | 'unknown';
+
+export interface BodyLandmark {
+  name: 'head' | 'neck' | 'left_shoulder' | 'right_shoulder' | 'left_elbow' | 'right_elbow' | 'left_wrist' | 'right_wrist' | 'left_hip' | 'right_hip' | 'left_knee' | 'right_knee' | 'left_ankle' | 'right_ankle';
+  x: number;
+  y: number;
+  confidence: number;
+}
+
 export interface CompreFaceBox {
   probability: number;
   x_min: number;
@@ -140,6 +149,8 @@ export interface DetectionObject {
   gender?: CompreFaceGender;
   pose?: CompreFacePose;
   landmarks?: [number, number][]; // normalized [x, y] coordinates
+  bodyLandmarks?: BodyLandmark[];
+  posture?: BodyPosture;
   similarity?: number;
   subjectName?: string;
   targetBbox?: [number, number, number, number];

@@ -384,9 +384,33 @@ export class VideoProcessor {
       const w = Math.floor(bw * width);
       const h = Math.floor(bh * height);
       const color = item.category === 'person' ? '#ef4444' : item.category === 'animal' ? '#3b82f6' : item.isKnown ? '#38bdf8' : item.category === 'car' ? '#a855f7' : '#06b6d4';
-      // Keep the rich recognition label visible: name, estimated age, and
-      // current emotion cue. Animal names use the same treatment.
-      const label = item.label || item.nameTag || item.subjectName || 'UNKNOWN';
+      // Keep the rich recognition label visible: name, estimated age, emotion,
+      // and the body-state estimate.
+      const postureLabel = item.posture && item.posture !== 'unknown' ? ` • ${item.posture.toUpperCase()}` : '';
+      const label = `${item.label || item.nameTag || item.subjectName || 'UNKNOWN'}${postureLabel}`;
+
+      if (item.bodyLandmarks?.length && (item.category === 'person' || item.category === 'animal')) {
+        const points = new Map<string, { x: number; y: number }>(item.bodyLandmarks.map((landmark) => [landmark.name, landmark]));
+        const links: Array<[string, string]> = [
+          ['head', 'neck'], ['neck', 'left_shoulder'], ['neck', 'right_shoulder'],
+          ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+          ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+          ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip'],
+          ['left_hip', 'right_hip'], ['left_hip', 'left_knee'], ['right_hip', 'right_knee'],
+          ['left_knee', 'left_ankle'], ['right_knee', 'right_ankle'],
+        ];
+        ctx.strokeStyle = `${color}99`;
+        ctx.lineWidth = 1.5;
+        links.forEach(([from, to]) => {
+          const a = points.get(from); const b = points.get(to);
+          if (!a || !b) return;
+          ctx.beginPath(); ctx.moveTo(a.x * width, a.y * height); ctx.lineTo(b.x * width, b.y * height); ctx.stroke();
+        });
+        ctx.fillStyle = color;
+        item.bodyLandmarks.forEach((point) => {
+          ctx.beginPath(); ctx.arc(point.x * width, point.y * height, point.name === 'head' ? 4 : 3, 0, Math.PI * 2); ctx.fill();
+        });
+      }
 
       // Crisp double-line head box with corner brackets. The inner line makes
       // the face boundary readable even over bright or moving backgrounds.
