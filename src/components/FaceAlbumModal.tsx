@@ -167,11 +167,11 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
               <div className="flex items-center gap-2">
                 <h2 className="truncate text-sm font-bold text-white sm:text-lg">Biometric Face & Animal Intelligence</h2>
                 <span className="hidden rounded border border-cyan-800 bg-cyan-950 px-2 py-0.5 font-mono text-[10px] text-cyan-400 sm:inline">
-                  OFFLINE NEURAL CLUSTERING
+                  FACE + LOCAL PET RECOGNITION
                 </span>
               </div>
               <p className="hidden text-xs font-mono text-slate-400 sm:block">
-                Stores face profiles and animal reference photos separately; CompreFace enrollment is for people.
+                CompreFace identifies people; the local Pet Recognition module compares enrolled animal reference photos privately in your browser.
               </p>
             </div>
           </div>

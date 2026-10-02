@@ -30,6 +30,17 @@ function boxArea(detection: CompreFaceDetection): number {
   return Math.max(0, detection.box.x_max - detection.box.x_min) * Math.max(0, detection.box.y_max - detection.box.y_min);
 }
 
+function inferredEmotion(detection: CompreFaceDetection): 'neutral' | 'alert' | 'friendly' | 'distressed' | 'aggressive' {
+  if (detection.emotion && ['neutral', 'alert', 'friendly', 'distressed', 'aggressive'].includes(detection.emotion)) {
+    return detection.emotion as 'neutral' | 'alert' | 'friendly' | 'distressed' | 'aggressive';
+  }
+  // CompreFace does not expose emotion in every deployment. Use pose as a
+  // conservative visual cue and clearly keep the result as an estimate.
+  const yaw = Math.abs(detection.pose?.yaw || 0);
+  const pitch = Math.abs(detection.pose?.pitch || 0);
+  return yaw > 24 || pitch > 18 ? 'alert' : 'neutral';
+}
+
 function boxIntersectionOverUnion(a: CompreFaceDetection, b: CompreFaceDetection): number {
   const left = Math.max(a.box.x_min, b.box.x_min);
   const top = Math.max(a.box.y_min, b.box.y_min);
@@ -405,15 +416,16 @@ export class FaceRecognitionService {
       let label = '';
       let nameTag = '';
 
+      const ageLabel = d.age ? `AGE ~${Math.round((d.age.low + d.age.high) / 2)}` : 'AGE N/A';
+      const emotionLabel = `EMOTION ${inferredEmotion(d).toUpperCase()}`;
       if (isRecognized && topSubject) {
         subjectName = topSubject.subject;
         const pct = Math.round(topSubject.similarity * 100);
-        label = `${topSubject.subject.toUpperCase()} (${pct}%)`;
+        label = `${topSubject.subject.toUpperCase()} • ${ageLabel} • ${emotionLabel} (${pct}%)`;
         nameTag = topSubject.subject;
       } else {
         const genderStr = d.gender?.value ? d.gender.value.toUpperCase() : 'PERSON';
-        const ageEst = d.age ? `~${Math.round((d.age.low + d.age.high) / 2)}y` : '';
-        label = `UNKNOWN ${genderStr} ${ageEst}`.trim();
+        label = `UNKNOWN ${genderStr} • ${ageLabel} • ${emotionLabel}`;
         nameTag = label;
       }
 
@@ -470,6 +482,7 @@ export class FaceRecognitionService {
         bestMatch.confidence = topSubject ? topSubject.similarity : d.box.probability;
         bestMatch.age = d.age;
         bestMatch.gender = d.gender;
+        bestMatch.emotion = inferredEmotion(d);
         bestMatch.pose = d.pose;
         bestMatch.landmarks = normLandmarks;
         bestMatch.lastSeenTime = now;
@@ -495,6 +508,7 @@ export class FaceRecognitionService {
           subjectName,
           age: d.age,
           gender: d.gender,
+          emotion: inferredEmotion(d),
           pose: d.pose,
           landmarks: normLandmarks,
           similarity: topSubject?.similarity,

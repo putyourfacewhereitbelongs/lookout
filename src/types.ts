@@ -118,6 +118,7 @@ export interface CompreFaceDetection {
   gender?: CompreFaceGender;
   pose?: CompreFacePose;
   landmarks?: [number, number][];
+  emotion?: string;
 }
 
 export interface DetectionObject {

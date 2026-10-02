@@ -384,7 +384,9 @@ export class VideoProcessor {
       const w = Math.floor(bw * width);
       const h = Math.floor(bh * height);
       const color = item.category === 'person' ? '#ef4444' : item.category === 'animal' ? '#3b82f6' : item.isKnown ? '#38bdf8' : item.category === 'car' ? '#a855f7' : '#06b6d4';
-      const label = item.isKnown && item.subjectName ? item.subjectName : item.nameTag || item.label;
+      // Keep the rich recognition label visible: name, estimated age, and
+      // current emotion cue. Animal names use the same treatment.
+      const label = item.label || item.nameTag || item.subjectName || 'UNKNOWN';
 
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;

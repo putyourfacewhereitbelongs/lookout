@@ -32,6 +32,26 @@ button,
   touch-action: manipulation;
 }
 
+.alert-video-preview {
+  animation: alert-video-zoom 6s ease-in-out infinite alternate;
+}
+
+.alert-video-scanline {
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, transparent 0, transparent 5px, rgba(251, 191, 36, 0.08) 6px, transparent 7px);
+  animation: alert-scanline 1.8s linear infinite;
+}
+
+@keyframes alert-video-zoom {
+  from { transform: scale(1.01); filter: saturate(1) contrast(1); }
+  to { transform: scale(1.07); filter: saturate(1.18) contrast(1.08); }
+}
+
+@keyframes alert-scanline {
+  from { background-position: 0 -20px; }
+  to { background-position: 0 20px; }
+}
+
 /* Custom scrollbar for desktop views */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;

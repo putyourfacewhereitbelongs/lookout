@@ -48,6 +48,7 @@ import { StorageService } from './services/db';
 import { audioEngine } from './services/audioEngine';
 import { videoProcessor } from './services/videoProcessor';
 import { faceRecognitionService } from './services/faceRecognitionService';
+import { petRecognitionService } from './services/petRecognitionService';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -98,6 +99,7 @@ export function App() {
   const [recordings, setRecordings] = useState<SavedRecording[]>(StorageService.getRecordings());
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>(StorageService.getHistoryEvents());
   const [liveAlert, setLiveAlert] = useState('');
+  const [visualAlertFrame, setVisualAlertFrame] = useState('');
   const [cameraFeedError, setCameraFeedError] = useState('');
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [faceProfiles, setFaceProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
@@ -488,7 +490,7 @@ export function App() {
           setDetectedObjects([...updated]);
 
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
-          detections.forEach((d) => {
+          for (const d of detections) {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
             if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
               StorageService.updateFaceLastSeenByName(topSubj.subject);
@@ -504,6 +506,7 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `face:${identityKey}`, 60_000);
+                showScanFeedback(`${topSubj.subject} arrived or is present in the monitored scene.`);
               } else {
                 const approached = !previous.approachLogged && previous.baseHeight > 0 && faceHeight >= previous.baseHeight * 1.5 && faceHeight - previous.baseHeight >= 0.035;
                 faceApproachRef.current.set(identityKey, {
@@ -572,14 +575,48 @@ export function App() {
                   }
                 }
               }
+              // Animal profiles are recognized locally against their enrolled
+              // reference photos, independently of CompreFace's human-face
+              // database. This turns the existing animal album into a true pet
+              // recognition path rather than only a manual label.
+              if (faceCrop) {
+                const petMatch = await petRecognitionService.match(faceCrop, StorageService.getFaceProfiles());
+                if (petMatch) {
+                  const animalDetection = {
+                    ...d,
+                    subjects: [{ subject: petMatch.profile.name, similarity: petMatch.similarity }],
+                  };
+                  const animalUpdated = faceRecognitionService.correlateDetections(
+                    detectedObjectsRef.current,
+                    [animalDetection],
+                    snapW,
+                    snapH,
+                    0.85,
+                    StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
+                  );
+                  detectedObjectsRef.current = animalUpdated;
+                  setDetectedObjects([...animalUpdated]);
+                  StorageService.updateFaceLastSeenByName(petMatch.profile.name);
+                  recordHistoryEvent({
+                    type: 'animal_detected',
+                    title: `${petMatch.profile.name} recognized`,
+                    details: `${petMatch.profile.name} was recognized locally from its enrolled animal reference photos.`,
+                    severity: 'info',
+                    subjectName: petMatch.profile.name,
+                    confidence: petMatch.similarity,
+                  }, `animal:${activeCamId}:${petMatch.profile.name}`, 60_000);
+                  showScanFeedback(`${petMatch.profile.name} was recognized in the monitored yard or driveway.`);
+                  continue;
+                }
+              }
               StorageService.catalogUnknownFace(
                 'Unknown Subject',
                 'person',
-                'Face captured from CompreFace detection. Review and assign to a person.',
+                'Face captured from CompreFace detection. Review and assign to a person, or save it as an animal profile for local pet recognition.',
                 faceCrop
               );
             }
-          });
+          }
           setFaceProfiles(StorageService.getFaceProfiles());
         }
       } catch (err) {
@@ -620,6 +657,11 @@ export function App() {
       .filter(Boolean)
       .filter((value, index, values) => values.indexOf(value) === index)
       .slice(0, 8);
+    const person = detectedObjects.find((object) => object.category === 'person');
+    const packageObject = detectedObjects.find((object) => /package|parcel|box|delivery/i.test(object.label));
+    if (packageObject) return `${activeCamera.name}: a package or delivery is visible at the monitored entry area`;
+    if (person?.subjectName) return `${activeCamera.name}: ${person.subjectName} is present in the yard or driveway scene`;
+    if (person) return `${activeCamera.name}: a person is walking through the monitored yard or driveway`;
     return visibleSubjects.length > 0
       ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
       : `${activeCamera.name}: live camera scene`;
@@ -775,14 +817,28 @@ export function App() {
 
   const showScanFeedback = (message: string) => {
     setLiveAlert(message);
-    window.setTimeout(() => setLiveAlert((current) => current === message ? '' : current), 6000);
+    const canvas = canvasRef.current;
+    if (canvas) setVisualAlertFrame(canvas.toDataURL('image/jpeg', 0.86));
+    window.setTimeout(() => {
+      setLiveAlert((current) => current === message ? '' : current);
+      setVisualAlertFrame((current) => current ? '' : current);
+    }, 6000);
   };
 
   return (
     <div className={`app-shell min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
-      {liveAlert && <div role="alert" className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-center gap-2 rounded-xl border border-amber-500/60 bg-amber-950/95 px-4 py-3 text-sm font-semibold text-amber-100 shadow-xl sm:left-auto sm:right-4 sm:top-16 sm:max-w-md"><AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />{liveAlert}</div>}
+      {liveAlert && <div role="alert" className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/75 p-3 backdrop-blur-[2px] sm:p-8">
+        <div className="relative flex h-full max-h-[min(82vh,720px)] w-full max-w-5xl items-end overflow-hidden rounded-2xl border-2 border-amber-400/80 bg-slate-950 shadow-2xl shadow-amber-950/50">
+          {visualAlertFrame ? <img src={visualAlertFrame} alt="Animated camera alert preview" className="absolute inset-0 h-full w-full object-cover opacity-80 alert-video-preview" /> : <div className="absolute inset-0 bg-gradient-to-br from-amber-950 via-slate-950 to-black" />}
+          <div className="absolute inset-0 alert-video-scanline" />
+          <div className="relative m-3 w-full rounded-xl border border-amber-400/60 bg-black/75 p-4 text-amber-50 backdrop-blur-md sm:m-6 sm:p-6">
+            <div className="flex items-center gap-2 text-xs font-mono font-bold uppercase tracking-widest text-amber-300"><AlertTriangle className="h-5 w-5 animate-pulse" /> Video alert • live scene preview</div>
+            <p className="mt-2 text-lg font-bold sm:text-2xl">{liveAlert}</p>
+          </div>
+        </div>
+      </div>}
 
       {/* TOP PERSISTENT NAVIGATION BAR */}
       <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/90 px-3 py-2.5 shadow-lg backdrop-blur-md sm:flex-nowrap sm:px-4">
