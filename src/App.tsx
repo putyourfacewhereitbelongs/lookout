@@ -48,6 +48,12 @@ import { StorageService } from './services/db';
 import { audioEngine } from './services/audioEngine';
 import { videoProcessor } from './services/videoProcessor';
 import { faceRecognitionService } from './services/faceRecognitionService';
+import {
+  captureNativeHdFrame,
+  captureSharpNativeFrame,
+  createHdFaceReference,
+  HD_FACE_MAX_WIDTH,
+} from './services/hdFaceCapture';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -69,7 +75,7 @@ const INITIAL_CAMERAS: CameraSource[] = [
     type: 'local',
     status: 'online',
     isRecording: false,
-    fps: 60,
+    fps: 30,
   },
   {
     id: 'cam-screen-01',
@@ -77,7 +83,7 @@ const INITIAL_CAMERAS: CameraSource[] = [
     type: 'screen',
     status: 'online',
     isRecording: false,
-    fps: 60,
+    fps: 30,
   },
 ];
 
@@ -277,18 +283,35 @@ export function App() {
         attachStream(activeCamera.stream);
       } else if (activeCamera.type === 'local') {
         try {
-          const video = isPhone
-            ? { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 30, max: 30 } }
-            : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
+          // Ask the camera for real HD pixels. 30 FPS is deliberate: many
+          // inexpensive webcams silently fall back to 640px when 60 FPS is
+          // requested, which is the main source of blurry face references.
+          const preferredVideo: MediaTrackConstraints = isPhone
+            ? { width: { ideal: 1280, min: 960, max: 1920 }, height: { ideal: 720, min: 540, max: 1080 }, frameRate: { ideal: 30, max: 30 } }
+            : { width: { ideal: 1920, min: 1280, max: 1920 }, height: { ideal: 1080, min: 720, max: 1080 }, frameRate: { ideal: 30, max: 30 } };
+          const fallbackVideo: MediaTrackConstraints = isPhone
+            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }
+            : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } };
           let s: MediaStream;
           try {
-            s = await navigator.mediaDevices.getUserMedia({
-              video,
-              audio: false,
-            });
+            s = await navigator.mediaDevices.getUserMedia({ video: preferredVideo, audio: false });
           } catch {
-            // Preserve the camera feed on devices without an available microphone.
-            s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+            // Some older drivers reject min/max combinations even though they
+            // can produce HD. Retry with ideal-only constraints before showing
+            // an error instead of silently choosing a low-resolution profile.
+            s = await navigator.mediaDevices.getUserMedia({ video: fallbackVideo, audio: false });
+          }
+          const track = s.getVideoTracks()[0];
+          if (track) {
+            try {
+              // Continuous focus/exposure are best-effort capabilities. Do not
+              // replace the working stream when a camera does not expose them.
+              await track.applyConstraints({
+                advanced: [{ focusMode: 'continuous', exposureMode: 'continuous', whiteBalanceMode: 'continuous' }],
+              } as unknown as MediaTrackConstraints);
+            } catch {
+              // The requested resolution remains valid without these controls.
+            }
           }
           currentStream = s;
           attachStream(s);
@@ -423,28 +446,21 @@ export function App() {
 
       const video = videoElementRef.current;
       let snapshotBase64 = '';
-      let snapW = 640;
-      let snapH = 270;
+      let snapW = 1280;
+      let snapH = 720;
       let recognitionCanvas: HTMLCanvasElement | null = null;
 
-      // Keep normal recognition inexpensive. On the scheduled long-range pass,
-      // preserve materially more of the desktop camera's native detail before
-      // splitting it into enlarged face tiles. Phones retain their lighter
-      // capture policy for live responsiveness.
+      // Recognition receives the native camera frame at HD (up to 1920x1080),
+      // not the small 640px display sample. CompreFace may resize internally,
+      // but sending the source pixels gives its detector the largest possible
+      // face detail and prevents distant faces from becoming pre-blurred.
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
-        const offscreen = document.createElement('canvas');
-        recognitionCanvas = offscreen;
-        const maximumWidth = 640;
-        snapW = Math.min(maximumWidth, video.videoWidth);
-        snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
-        offscreen.width = snapW;
-        offscreen.height = snapH;
-        const ctx = offscreen.getContext('2d');
-        if (ctx) {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(video, 0, 0, snapW, snapH);
-          snapshotBase64 = offscreen.toDataURL('image/jpeg', 0.72);
+        const frame = captureNativeHdFrame(video, isPhone ? 1280 : HD_FACE_MAX_WIDTH, 0.92);
+        if (frame) {
+          recognitionCanvas = frame.canvas;
+          snapW = frame.width;
+          snapH = frame.height;
+          snapshotBase64 = frame.imageBase64;
         }
       }
 
@@ -469,7 +485,7 @@ export function App() {
             detections,
             snapW,
             snapH,
-            storagePreferences.faceMatchThreshold || 0.92,
+            storagePreferences.faceMatchThreshold || 0.84,
             StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
           );
           detectedObjectsRef.current = updated;
@@ -478,7 +494,7 @@ export function App() {
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
           detections.forEach((d) => {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
-            if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
+            if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.84)) {
               StorageService.updateFaceLastSeenByName(topSubj.subject);
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
               const now = Date.now();
@@ -511,31 +527,15 @@ export function App() {
             } else {
               let faceCrop: string | undefined;
               if (recognitionCanvas && d.box) {
-                const faceWidth = d.box.x_max - d.box.x_min;
-                const faceHeight = d.box.y_max - d.box.y_min;
-                const paddingX = faceWidth * 0.2;
-                const paddingY = faceHeight * 0.2;
-                const sx = Math.max(0, Math.floor(d.box.x_min - paddingX));
-                const sy = Math.max(0, Math.floor(d.box.y_min - paddingY));
-                const ex = Math.min(snapW, Math.ceil(d.box.x_max + paddingX));
-                const ey = Math.min(snapH, Math.ceil(d.box.y_max + paddingY));
-                const cropWidth = ex - sx;
-                const cropHeight = ey - sy;
-                if (cropWidth > 0 && cropHeight > 0) {
-                  const cropCanvas = document.createElement('canvas');
-                  cropCanvas.width = 192;
-                  cropCanvas.height = 192;
-                  const cropContext = cropCanvas.getContext('2d');
-                  if (cropContext) {
-                    cropContext.drawImage(recognitionCanvas, sx, sy, cropWidth, cropHeight, 0, 0, 192, 192);
-                    faceCrop = cropCanvas.toDataURL('image/jpeg', 0.88);
-                  }
-                }
+                // Store a crop from the same native HD frame that produced the
+                // detection. Small 192px crops made the old enrollment photos
+                // permanently blurry, even when the webcam itself was sharp.
+                faceCrop = createHdFaceReference(recognitionCanvas, d.box)?.imageBase64;
               }
               StorageService.catalogUnknownFace(
                 'Unknown Subject',
                 'person',
-                'Face captured from CompreFace detection. Review and assign to a person.',
+                'Sharp HD face capture from the native camera frame. Review and assign to a person.',
                 faceCrop
               );
             }
@@ -700,19 +700,33 @@ export function App() {
   };
 
 
-  const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 2560) => {
+  const captureLiveVideoFrame = (maxWidth = isPhone ? 1280 : HD_FACE_MAX_WIDTH) => {
     const video = videoElementRef.current;
-    if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
-    const width = Math.min(maxWidth, video.videoWidth);
-    const height = Math.round((width * video.videoHeight) / video.videoWidth);
-    const frame = document.createElement('canvas');
-    frame.width = width;
-    frame.height = height;
-    const context = frame.getContext('2d');
-    if (!context) return null;
-    context.drawImage(video, 0, 0, width, height);
-    return { imageBase64: frame.toDataURL('image/jpeg', isPhone ? 0.84 : 0.90), width, height, canvas: frame };
+    const frame = video ? captureNativeHdFrame(video, maxWidth, isPhone ? 0.90 : 0.92) : null;
+    return frame
+      ? { imageBase64: frame.imageBase64, width: frame.width, height: frame.height, canvas: frame.canvas }
+      : null;
   };
+
+  /**
+   * Manual enrollment capture: evaluate several native-HD frames, recognize
+   * the sharpest one, then crop the returned face without downsampling it to
+   * the old 192px thumbnail size.
+   */
+  const captureSharpHdFace = useCallback(async (): Promise<string | null> => {
+    const video = videoElementRef.current;
+    if (!video) return null;
+    const frame = await captureSharpNativeFrame(video, 5, isPhone ? 1280 : HD_FACE_MAX_WIDTH);
+    if (!frame || !(await faceRecognitionService.waitUntilAvailable())) return null;
+    const detections = await faceRecognitionService.recognize(frame.imageBase64);
+    const face = [...detections].sort((a, b) => {
+      const areaA = Math.max(0, a.box.x_max - a.box.x_min) * Math.max(0, a.box.y_max - a.box.y_min);
+      const areaB = Math.max(0, b.box.x_max - b.box.x_min) * Math.max(0, b.box.y_max - b.box.y_min);
+      return areaB - areaA;
+    })[0];
+    if (!face) return null;
+    return createHdFaceReference(frame.canvas, face.box)?.imageBase64 || null;
+  }, [isPhone]);
 
   const showScanFeedback = (message: string) => {
     setLiveAlert(message);
@@ -1000,7 +1014,7 @@ export function App() {
                     dets,
                     frame.width,
                     frame.height,
-                    storagePreferences.faceMatchThreshold || 0.92
+                    storagePreferences.faceMatchThreshold || 0.84
                   );
                   detectedObjectsRef.current = updated;
                   setDetectedObjects([...updated]);
@@ -1145,6 +1159,7 @@ export function App() {
       <FaceAlbumModal
         isOpen={showFaceAlbum}
         onClose={() => setShowFaceAlbum(false)}
+        onCaptureHdFace={captureSharpHdFace}
         onProfileUpdated={() => setFaceProfiles(StorageService.getFaceProfiles())}
       />
       <AddCameraModal

@@ -120,7 +120,9 @@ export const DEFAULT_STORAGE_PREFERENCES: StoragePreferences = {
   recordingRetentionDays: 14,
   autoPurgeOldRecordings: true,
   facialRecognitionMasterEnabled: true,
-  faceMatchThreshold: 0.92,
+  // One clear enrollment photo generally scores below the old 92% setting.
+  // Keep a safer balanced default that still requires an unambiguous lead.
+  faceMatchThreshold: 0.84,
 };
 
 // Seed recognized profiles including CompreFace biometric database subjects
@@ -731,7 +733,12 @@ export class StorageService {
   static getStoragePreferences(): StoragePreferences {
     const saved = this.getSavedSettings();
     if (saved && saved.storagePreferences) {
-      return { ...DEFAULT_STORAGE_PREFERENCES, ...saved.storagePreferences };
+      const merged = { ...DEFAULT_STORAGE_PREFERENCES, ...saved.storagePreferences };
+      // Migrate the original balanced value. It was too strict for a single
+      // sharp enrollment photo and caused otherwise good HD matches to flash
+      // as UNKNOWN between frames.
+      if (merged.faceMatchThreshold === 0.92) merged.faceMatchThreshold = 0.84;
+      return merged;
     }
     return DEFAULT_STORAGE_PREFERENCES;
   }

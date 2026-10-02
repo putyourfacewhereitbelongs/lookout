@@ -23,10 +23,12 @@ import { RefreshCw } from 'lucide-react';
 interface FaceAlbumModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Captures a sharp native-HD frame from the active camera and returns its face crop. */
+  onCaptureHdFace?: () => Promise<string | null>;
   onProfileUpdated?: () => void;
 }
 
-export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose, onProfileUpdated }) => {
+export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose, onCaptureHdFace, onProfileUpdated }) => {
   const [activeTab, setActiveTab] = useState<'unknown' | 'known'>('unknown');
   const [profiles, setProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
   const [editingProfile, setEditingProfile] = useState<FaceProfile | null>(null);
@@ -38,6 +40,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
   const [comprefaceSubjects, setComprefaceSubjects] = useState<string[]>([]);
   const [registrationTarget, setRegistrationTarget] = useState('__new__');
   const [isRegisteringFace, setIsRegisteringFace] = useState(false);
+  const [isCapturingHdFace, setIsCapturingHdFace] = useState(false);
   const [registrationMessage, setRegistrationMessage] = useState('');
 
   useEffect(() => {
@@ -98,6 +101,32 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
         .catch(() => setComprefaceSubjects([]));
     } else {
       setComprefaceSubjects([]);
+    }
+  };
+
+  const handleCaptureHdFace = async () => {
+    if (!editingProfile || editType !== 'person' || !onCaptureHdFace) return;
+    setIsCapturingHdFace(true);
+    setRegistrationMessage('Capturing five native-HD frames and selecting the sharpest face…');
+    try {
+      const image = await onCaptureHdFace();
+      if (!image) {
+        setRegistrationMessage('No clear face was found. Move closer, face the camera, and hold still, then retry.');
+        return;
+      }
+      const updated = StorageService.getFaceProfiles().map((profile) => profile.id === editingProfile.id
+        ? { ...profile, thumbnail: image, snapshots: [...new Set([...(profile.snapshots || []), image])].slice(-12), lastSnapshotAt: Date.now() }
+        : profile);
+      StorageService.saveFaceProfiles(updated);
+      const refreshed = updated.find((profile) => profile.id === editingProfile.id) || editingProfile;
+      setProfiles(updated);
+      setEditingProfile(refreshed);
+      setRegistrationMessage('Sharp HD face captured. Select SAVE & REGISTER FACE to enroll it.');
+      if (onProfileUpdated) onProfileUpdated();
+    } catch {
+      setRegistrationMessage('HD capture failed. Confirm camera access and try again.');
+    } finally {
+      setIsCapturingHdFace(false);
     }
   };
 
@@ -391,6 +420,19 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                   </div>
                 </div>
               </div>
+
+              {editType === 'person' && onCaptureHdFace && (
+                <button
+                  type="button"
+                  onClick={handleCaptureHdFace}
+                  disabled={isCapturingHdFace || isRegisteringFace}
+                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-700 bg-cyan-950/50 px-3 py-2 font-mono text-xs font-bold text-cyan-200 transition hover:bg-cyan-900/70 disabled:cursor-wait disabled:opacity-50"
+                  title="Capture five native-resolution camera frames and keep the sharpest face"
+                >
+                  <Camera className={`h-4 w-4 ${isCapturingHdFace ? 'animate-pulse' : ''}`} />
+                  {isCapturingHdFace ? 'CAPTURING SHARP HD FACE…' : 'RETAKE SHARP HD FACE'}
+                </button>
+              )}
 
               <div className="mt-4 space-y-3 font-mono text-xs">
                 <div>

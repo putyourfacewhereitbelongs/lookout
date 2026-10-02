@@ -141,6 +141,8 @@ export interface DetectionObject {
   landmarks?: [number, number][]; // normalized [x, y] coordinates
   similarity?: number;
   subjectName?: string;
+  /** Last frame with actual identity evidence (separate from visual tracking). */
+  lastKnownTime?: number;
   targetBbox?: [number, number, number, number];
   silhouetteBbox?: [number, number, number, number];
   targetSilhouetteBbox?: [number, number, number, number];

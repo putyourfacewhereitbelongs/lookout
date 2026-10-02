@@ -1,6 +1,9 @@
 import { CompreFaceDetection, DetectionObject } from '../types';
+import { createEnrollmentVariants } from './hdFaceCapture';
 
 const PERSON_TRACK_RETENTION_MS = 2200;
+const IDENTITY_HOLD_MS = 5000;
+const MIN_IDENTITY_SIMILARITY = 0.80;
 const LONG_RANGE_TILE_COLUMNS = 3;
 const LONG_RANGE_TILE_ROWS = 2;
 const LONG_RANGE_TILE_WIDTH_RATIO = 0.46;
@@ -123,6 +126,15 @@ export class FaceRecognitionService {
 
   getLastRecognitionError(): string {
     return this.lastRecognitionError;
+  }
+
+  /** Lets an on-demand HD enrollment wait for the single active request. */
+  async waitUntilAvailable(timeoutMs = 2000): Promise<boolean> {
+    const startedAt = Date.now();
+    while (this.isProcessing && Date.now() - startedAt < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return !this.isProcessing;
   }
 
   static getInstance(): FaceRecognitionService {
@@ -267,10 +279,11 @@ export class FaceRecognitionService {
 
   isReliableMatch(detection: CompreFaceDetection, threshold: number): boolean {
     const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    // Honor the "Sensitive" setting while keeping a meaningful floor and a
-    // clear lead over the next enrolled identity. This is especially important
-    // for small distant faces whose embedding score is naturally lower.
-    const requiredSimilarity = Math.max(0.85, Math.min(0.99, threshold));
+    // CompreFace similarity is not a percentage. A single clear enrollment
+    // photo commonly scores in the low-to-mid 80s, especially from a webcam
+    // angle. Keep an 80% safety floor, then require a useful lead over the
+    // runner-up identity so improving recall does not make every face a match.
+    const requiredSimilarity = Math.max(MIN_IDENTITY_SIMILARITY, Math.min(0.98, threshold));
     return Boolean(best && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
   }
@@ -301,12 +314,32 @@ export class FaceRecognitionService {
    */
   async enrollFace(subject: string, imageBase64: string): Promise<any> {
     try {
-      const res = await fetch('/api/recognition/faces', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subject, imageBase64 }),
-      });
-      return await res.json();
+      // A single sharp capture is enough for the user. These conservative
+      // variants give CompreFace mirrored and slightly tighter references so
+      // the same person is recognized when lighting or head angle changes.
+      const variants = await createEnrollmentVariants(imageBase64);
+      let firstResult: any = null;
+      let enrolledCount = 0;
+
+      for (const variant of variants) {
+        const res = await fetch('/api/recognition/faces', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ subject, imageBase64: variant }),
+        });
+        const result = await res.json().catch(() => ({ success: false }));
+        if (!firstResult) firstResult = result;
+        if (result?.success) enrolledCount += 1;
+        // A failed primary image means the enrollment itself failed. A failed
+        // optional variant does not erase a successful sharp reference.
+        if (!result?.success && enrolledCount === 0) return result;
+      }
+
+      return {
+        ...(firstResult || { success: false }),
+        success: enrolledCount > 0,
+        enrolledCount,
+      };
     } catch (err) {
       console.warn('Enroll face error:', err);
       return { success: false };
@@ -395,11 +428,11 @@ export class FaceRecognitionService {
       // Check subject match
       const rankedSubjects = [...(d.subjects || [])].sort((a, b) => b.similarity - a.similarity);
       const topSubject = rankedSubjects[0] || null;
-      const isRecognized = this.isReliableMatch(d, matchThreshold);
-      const isRecognizedAnimal = Boolean(
+      let isRecognized = this.isReliableMatch(d, matchThreshold);
+      let isRecognizedAnimal = Boolean(
         isRecognized && topSubject && animalNames.some((name) => name.toLowerCase() === topSubject.subject.toLowerCase())
       );
-      const category = isRecognizedAnimal ? 'animal' : 'person';
+      let category: 'animal' | 'person' = isRecognizedAnimal ? 'animal' : 'person';
 
       let subjectName = '';
       let label = '';
@@ -448,11 +481,42 @@ export class FaceRecognitionService {
         }
       }
 
+      // Do not alternate between a known name and UNKNOWN when one frame is
+      // slightly soft or the recognizer returns a low-confidence subject list.
+      // A nearby track may continue its last confirmed identity for a few
+      // seconds, but only the same subject can refresh that continuation.
+      const continuationFloor = Math.max(MIN_IDENTITY_SIMILARITY, Math.min(0.90, matchThreshold - 0.08));
+      const sameTopIdentity = Boolean(
+        bestMatch?.isKnown && topSubject && bestMatch.subjectName &&
+        bestMatch.subjectName.toLowerCase() === topSubject.subject.toLowerCase()
+      );
+      const lowConfidenceContinuation = Boolean(
+        !isRecognized && sameTopIdentity && topSubject && topSubject.similarity >= continuationFloor
+      );
+      const heldIdentity = Boolean(
+        !isRecognized && !topSubject && bestMatch?.isKnown &&
+        typeof bestMatch.lastKnownTime === 'number' && now - bestMatch.lastKnownTime < IDENTITY_HOLD_MS
+      );
+      if (lowConfidenceContinuation || heldIdentity) {
+        isRecognized = true;
+        subjectName = topSubject?.subject || bestMatch?.subjectName || '';
+        isRecognizedAnimal = Boolean(
+          subjectName && animalNames.some((name) => name.toLowerCase() === subjectName.toLowerCase())
+        );
+        category = isRecognizedAnimal ? 'animal' : 'person';
+        const similarity = topSubject?.similarity ?? bestMatch?.similarity ?? bestMatch?.confidence ?? 0;
+        label = `${subjectName.toUpperCase()} (${Math.round(similarity * 100)}%)`;
+        nameTag = subjectName;
+      }
+
       if (bestMatch) {
         // Update existing tracked person
         matchedPersonIds.add(bestMatch.id);
         const previousTarget = bestMatch.targetBbox || bestMatch.bbox;
-        const sameKnownIdentity = isRecognized && bestMatch.isKnown && bestMatch.subjectName === subjectName;
+        const sameKnownIdentity = Boolean(
+          isRecognized && bestMatch.isKnown && bestMatch.subjectName && subjectName &&
+          bestMatch.subjectName.toLowerCase() === subjectName.toLowerCase()
+        );
         const measurementWeight = sameKnownIdentity ? 0.68 : 0.55;
         bestMatch.targetBbox = targetBbox.map((value, index) =>
           previousTarget[index] * (1 - measurementWeight) + value * measurementWeight
@@ -473,6 +537,7 @@ export class FaceRecognitionService {
         bestMatch.pose = d.pose;
         bestMatch.landmarks = normLandmarks;
         bestMatch.lastSeenTime = now;
+        if (topSubject && (isRecognized || lowConfidenceContinuation)) bestMatch.lastKnownTime = now;
       } else {
         // Spawn newly identified tracked person
         const newId = `${category}-cf-${now}-${detIdx}`;
@@ -499,6 +564,7 @@ export class FaceRecognitionService {
           landmarks: normLandmarks,
           similarity: topSubject?.similarity,
           lastSeenTime: now,
+          lastKnownTime: isRecognized && topSubject ? now : undefined,
           silhouetteColor: isRecognized ? '#3b82f6' : '#ef4444',
         });
       }
