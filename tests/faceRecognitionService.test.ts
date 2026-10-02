@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FaceRecognitionService } from '../src/services/faceRecognitionService';
+import {
+  FaceRecognitionService,
+  mapDetectionFromTile,
+  mergeFaceDetections,
+  shouldRunLongRangeTiles,
+} from '../src/services/faceRecognitionService';
 import type { CompreFaceDetection, DetectionObject } from '../src/types';
 
 const service = new FaceRecognitionService();
@@ -17,8 +22,9 @@ test('accepts a high, unambiguous identity match', () => {
   assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.95 }]), 0.92), true);
 });
 
-test('rejects matches below the safety floor even if the configured threshold is lower', () => {
-  assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.89 }]), 0.75), false);
+test('honors the sensitive setting for distant faces without going below the safety floor', () => {
+  assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.89 }]), 0.75), true);
+  assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.84 }]), 0.75), false);
 });
 
 test('rejects close competing identity scores', () => {
@@ -26,6 +32,43 @@ test('rejects close competing identity scores', () => {
     { subject: 'Alex', similarity: 0.96 },
     { subject: 'Alec', similarity: 0.91 },
   ]), 0.92), false);
+});
+
+test('maps an enlarged long-range tile back into source-frame coordinates', () => {
+  const mapped = mapDetectionFromTile({
+    box: { probability: 0.8, x_min: 200, y_min: 100, x_max: 600, y_max: 300 },
+    landmarks: [[400, 200]],
+  }, { x: 100, y: 50, width: 400, height: 200 }, 800, 400);
+
+  assert.deepEqual(mapped.box, { probability: 0.8, x_min: 200, y_min: 100, x_max: 400, y_max: 200 });
+  assert.deepEqual(mapped.landmarks, [[300, 150]]);
+});
+
+test('keeps the strongest face observation from overlapping long-range tiles', () => {
+  const weaker = detection([{ subject: 'Alex', similarity: 0.90 }]);
+  const stronger = {
+    ...detection([{ subject: 'Alex', similarity: 0.95 }]),
+    box: { probability: 0.8, x_min: 110, y_min: 90, x_max: 310, y_max: 290 },
+  };
+  const separate = {
+    ...detection([{ subject: 'Bea', similarity: 0.93 }]),
+    box: { probability: 0.9, x_min: 600, y_min: 120, x_max: 760, y_max: 300 },
+  };
+
+  const merged = mergeFaceDetections([weaker, stronger, separate]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged.some((item) => item.subjects?.[0].similarity === 0.95), true);
+  assert.equal(merged.some((item) => item.subjects?.[0].subject === 'Bea'), true);
+});
+
+test('requests long-range tiles only for absent or small faces', () => {
+  assert.equal(shouldRunLongRangeTiles([], 1920, 1080), true);
+  assert.equal(shouldRunLongRangeTiles([detection()], 1920, 1080), true);
+  const largeFace = {
+    ...detection(),
+    box: { probability: 0.99, x_min: 300, y_min: 200, x_max: 800, y_max: 800 },
+  };
+  assert.equal(shouldRunLongRangeTiles([largeFace], 1920, 1080), false);
 });
 
 test('correlates every returned landmark into normalized frame coordinates', () => {

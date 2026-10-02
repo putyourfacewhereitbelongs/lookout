@@ -341,7 +341,7 @@ export const NightVisionSection: React.FC<NightVisionSectionProps> = ({
           </div>
 
           <p className="text-[11px] text-slate-400">
-            Marks detected people in translucent red and animals in translucent blue, following the visible subject contour.
+            Uses an on-device semantic mask to mark only detected people in translucent red and animals in translucent blue. No box, oval, or background fallback is drawn; first use downloads and caches the contour model.
           </p>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">

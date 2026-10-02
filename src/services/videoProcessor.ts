@@ -11,7 +11,6 @@ export class VideoProcessor {
   private offscreenCanvas: HTMLCanvasElement;
   private offscreenCtx: CanvasRenderingContext2D | null;
   private displayCanvas: HTMLCanvasElement | null = null;
-  private silhouetteMaskHistory = new Map<string, { width: number; height: number; alpha: Uint8Array; lastUsed: number }>();
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
 
@@ -66,7 +65,7 @@ export class VideoProcessor {
     ctx.restore();
   }
 
-  // Process live video frame directly onto display canvas at low latency (60fps target)
+  // Process the live video frame directly onto the low-latency display canvas
   processFrame(
     video: HTMLVideoElement | HTMLCanvasElement,
     targetCanvas: HTMLCanvasElement,
@@ -128,11 +127,6 @@ export class VideoProcessor {
       this.applySuperResolutionSharpen(ctx, width, height);
     }
 
-    // Draw a translucent per-pixel subject mask before the tracking HUD.
-    if (redSilhouette.enabled) {
-      this.applySubjectSilhouette(ctx, width, height, detections, redSilhouette);
-    }
-
     // Render recognized people, animals, and objects.
     this.renderTrackingHUD(ctx, width, height, detections);
 
@@ -151,146 +145,6 @@ export class VideoProcessor {
     }
   }
 
-  // Segment within detector boxes by growing background inward from each box edge.
-  // Only the remaining connected foreground mask is tinted; no geometric fallback is used.
-  private applySubjectSilhouette(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    detections: DetectionObject[],
-    settings: RedSilhouetteSettings
-  ) {
-    if (!settings.targetPeople && !settings.targetAnimals) return;
-
-    for (const target of detections) {
-      const isPerson = target.category === 'person' && settings.targetPeople;
-      const isAnimal = target.category === 'animal' && settings.targetAnimals;
-      if (!isPerson && !isAnimal) continue;
-
-      const [bx, by, bw, bh] = target.category === 'person'
-        ? (target.silhouetteBbox || target.bbox)
-        : target.bbox;
-      const left = Math.max(0, Math.floor(bx * width));
-      const top = Math.max(0, Math.floor(by * height));
-      const right = Math.min(width, Math.ceil((bx + bw) * width));
-      const bottom = Math.min(height, Math.ceil((by + bh) * height));
-      const boxWidth = right - left;
-      const boxHeight = bottom - top;
-      if (boxWidth < 12 || boxHeight < 12) continue;
-
-      // Limit work per target while retaining enough pixels for a smooth contour.
-      const scale = Math.min(1, 192 / Math.max(boxWidth, boxHeight));
-      const maskWidth = Math.max(12, Math.round(boxWidth * scale));
-      const maskHeight = Math.max(12, Math.round(boxHeight * scale));
-      if (this.offscreenCanvas.width !== maskWidth || this.offscreenCanvas.height !== maskHeight) {
-        this.offscreenCanvas.width = maskWidth;
-        this.offscreenCanvas.height = maskHeight;
-      }
-      const maskCtx = this.offscreenCtx;
-      if (!maskCtx) continue;
-
-      try {
-        maskCtx.clearRect(0, 0, maskWidth, maskHeight);
-        maskCtx.drawImage(this.displayCanvas!, left, top, boxWidth, boxHeight, 0, 0, maskWidth, maskHeight);
-        const image = maskCtx.getImageData(0, 0, maskWidth, maskHeight);
-        const pixels = image.data;
-        const count = maskWidth * maskHeight;
-        const background = new Uint8Array(count);
-        const stack = new Int32Array(count);
-        let stackSize = 0;
-        const pushBackground = (index: number) => {
-          if (background[index]) return;
-          background[index] = 1;
-          stack[stackSize++] = index;
-        };
-
-        for (let x = 0; x < maskWidth; x++) {
-          pushBackground(x);
-          pushBackground((maskHeight - 1) * maskWidth + x);
-        }
-        for (let y = 1; y < maskHeight - 1; y++) {
-          pushBackground(y * maskWidth);
-          pushBackground(y * maskWidth + maskWidth - 1);
-        }
-
-        const threshold = 78 - Math.max(1, Math.min(5, settings.edgePrecision)) * 8;
-        const thresholdSquared = threshold * threshold * 3;
-        const visit = (from: number, to: number) => {
-          if (background[to]) return;
-          const a = from * 4;
-          const b = to * 4;
-          const dr = pixels[a] - pixels[b];
-          const dg = pixels[a + 1] - pixels[b + 1];
-          const db = pixels[a + 2] - pixels[b + 2];
-          if (dr * dr + dg * dg + db * db <= thresholdSquared) pushBackground(to);
-        };
-
-        while (stackSize > 0) {
-          const index = stack[--stackSize];
-          const x = index % maskWidth;
-          const y = Math.floor(index / maskWidth);
-          if (x > 0) visit(index, index - 1);
-          if (x + 1 < maskWidth) visit(index, index + 1);
-          if (y > 0) visit(index, index - maskWidth);
-          if (y + 1 < maskHeight) visit(index, index + maskWidth);
-        }
-
-        let subjectPixels = 0;
-        for (let i = 0; i < count; i++) if (!background[i]) subjectPixels++;
-        const subjectRatio = subjectPixels / count;
-        // Empty or nearly full masks indicate a poor contour; don't invent one.
-        if (subjectRatio < 0.025 || subjectRatio > 0.92) continue;
-
-        const [red, green, blue] = isPerson ? [239, 68, 68] : [59, 130, 246];
-        // Even at 100% strength, preserve the camera image beneath the tint.
-        const tintAlpha = Math.max(0, Math.min(1, settings.opacity)) * 0.42;
-        const now = Date.now();
-        const oldMask = this.silhouetteMaskHistory.get(target.id);
-        const canBlendMask = oldMask && oldMask.width === maskWidth && oldMask.height === maskHeight;
-        const nextMask = new Uint8Array(count);
-        for (let y = 0; y < maskHeight; y++) {
-          for (let x = 0; x < maskWidth; x++) {
-            let nearbySubject = 0;
-            for (let dy = -1; dy <= 1; dy++) {
-              for (let dx = -1; dx <= 1; dx++) {
-                const nx = x + dx;
-                const ny = y + dy;
-                if (nx >= 0 && ny >= 0 && nx < maskWidth && ny < maskHeight && !background[ny * maskWidth + nx]) {
-                  nearbySubject++;
-                }
-              }
-            }
-            const offset = (y * maskWidth + x) * 4;
-            const rawAlpha = Math.round((nearbySubject / 9) * 255);
-            const smoothedAlpha = canBlendMask
-              ? Math.round(oldMask.alpha[y * maskWidth + x] * 0.68 + rawAlpha * 0.32)
-              : rawAlpha;
-            nextMask[y * maskWidth + x] = smoothedAlpha;
-            pixels[offset] = red;
-            pixels[offset + 1] = green;
-            pixels[offset + 2] = blue;
-            pixels[offset + 3] = Math.round(smoothedAlpha * tintAlpha);
-          }
-        }
-        this.silhouetteMaskHistory.set(target.id, { width: maskWidth, height: maskHeight, alpha: nextMask, lastUsed: now });
-        for (const [id, history] of this.silhouetteMaskHistory) {
-          if (now - history.lastUsed > 5000) this.silhouetteMaskHistory.delete(id);
-        }
-        while (this.silhouetteMaskHistory.size > 128) {
-          const oldestId = this.silhouetteMaskHistory.keys().next().value;
-          if (!oldestId) break;
-          this.silhouetteMaskHistory.delete(oldestId);
-        }
-        maskCtx.putImageData(image, 0, 0);
-        ctx.drawImage(this.offscreenCanvas, 0, 0, maskWidth, maskHeight, left, top, boxWidth, boxHeight);
-      } catch {
-        // Cross-origin camera frames can block pixel reads. Leave the image
-        // untouched instead of drawing a misleading oval or rectangular fill.
-      }
-    }
-  }
-
-  // --- Advanced Colored Night Vision ---
   private applyColoredNightVision(
     ctx: CanvasRenderingContext2D,
     width: number,

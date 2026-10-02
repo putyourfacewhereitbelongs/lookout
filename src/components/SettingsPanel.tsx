@@ -318,7 +318,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       </div>
 
       {/* 3. SETTINGS CONTENT CONTAINER */}
-      <div className="p-4 sm:p-6 overflow-y-auto max-h-[calc(85vh-120px)] custom-scrollbar">
+      <div className="max-h-[calc(100dvh-9rem)] overflow-y-auto p-3 custom-scrollbar sm:max-h-[calc(85vh-120px)] sm:p-6">
         {activeTab === 'ai_detection' && (
           <AiSensitivitiesSection
             sensitivities={detectionSensitivities}

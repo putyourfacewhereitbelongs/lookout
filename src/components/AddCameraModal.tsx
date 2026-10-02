@@ -72,6 +72,8 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
 
   // Screen share form
   const [screenName, setScreenName] = useState('Workstation Screen Share Feed');
+  const prefersMobileCapture = typeof window !== 'undefined'
+    && window.matchMedia('(max-width: 767px), (pointer: coarse)').matches;
 
   if (!isOpen) return null;
 
@@ -171,7 +173,10 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
     try {
       if (navigator.mediaDevices?.getDisplayMedia) {
         const stream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always', frameRate: { ideal: 60 } } as any,
+          video: {
+            cursor: 'always',
+            frameRate: prefersMobileCapture ? { ideal: 30, max: 30 } : { ideal: 60 },
+          } as any,
           audio: true,
         });
 
@@ -182,8 +187,8 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
           stream: stream,
           status: 'online',
           isRecording: false,
-          fps: 60,
-          resolution: '1080p / 4K Desktop',
+          fps: prefersMobileCapture ? 30 : 60,
+          resolution: prefersMobileCapture ? '720p / 1080p Mobile' : '1080p / 4K Desktop',
           latencyMs: 14,
         };
         onAddCamera(newCam);
@@ -211,19 +216,21 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
   const handleAddLocalWebcam = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+        video: prefersMobileCapture
+          ? { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 30, max: 30 } }
+          : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
         audio: true,
       });
 
       const newCam: CameraSource = {
         id: `cam-local-${Date.now()}`,
-        name: 'Integrated Ultra-HD Lens (60 FPS)',
+        name: prefersMobileCapture ? 'Integrated Mobile Camera (30 FPS)' : 'Integrated Ultra-HD Lens (60 FPS)',
         type: 'local',
         stream: stream,
         status: 'online',
         isRecording: false,
-        fps: 60,
-        resolution: '1080p60 Crystal Clear',
+        fps: prefersMobileCapture ? 30 : 60,
+        resolution: prefersMobileCapture ? '720p30 Mobile' : '1080p60 Crystal Clear',
         latencyMs: 12,
         twoWayAudioSupported: true,
       };
@@ -247,10 +254,10 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-slate-900 border border-slate-700/80 rounded-2xl w-full max-w-xl overflow-hidden shadow-2xl animate-fade-in text-slate-100 flex flex-col">
+    <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+      <div className="mobile-dialog flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-700/80 bg-slate-900 text-slate-100 shadow-2xl animate-fade-in">
         {/* Modal Header */}
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="flex items-center justify-between border-b border-slate-800 p-3 sm:p-4">
           <div className="flex items-center gap-2.5">
             <div className="p-2 bg-cyan-950 border border-cyan-800 rounded-xl text-cyan-400">
               <Camera className="w-5 h-5" />
@@ -283,7 +290,8 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
             }`}
           >
             <Wifi className="w-3.5 h-3.5" />
-            <span>WYZE CAM (PTZ & MIC)</span>
+            <span className="hidden sm:inline">WYZE CAM (PTZ & MIC)</span>
+            <span className="sr-only">Wyze camera</span>
           </button>
 
           <button
@@ -295,7 +303,8 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
             }`}
           >
             <Globe className="w-3.5 h-3.5" />
-            <span>GENERIC IP CAM</span>
+            <span className="hidden sm:inline">GENERIC IP CAM</span>
+            <span className="sr-only">Generic IP camera</span>
           </button>
 
           <button
@@ -307,7 +316,8 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
             }`}
           >
             <Monitor className="w-3.5 h-3.5" />
-            <span>SCREEN SHARE</span>
+            <span className="hidden sm:inline">SCREEN SHARE</span>
+            <span className="sr-only">Screen share</span>
           </button>
 
           <button
@@ -319,12 +329,13 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
             }`}
           >
             <Video className="w-3.5 h-3.5" />
-            <span>HARDWARE LENS</span>
+            <span className="hidden sm:inline">HARDWARE LENS</span>
+            <span className="sr-only">Hardware lens</span>
           </button>
         </div>
 
         {/* Body content */}
-        <div className="p-5 overflow-y-auto max-h-[70vh] font-mono text-xs space-y-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 font-mono text-xs space-y-4 sm:p-5">
           {/* TAB 1: WYZE CAMERA */}
           {activeTab === 'wyze' && (
             <div className="space-y-3.5">
@@ -346,7 +357,7 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="text-slate-400 block mb-1">WYZE MODEL:</label>
                   <select
@@ -425,7 +436,7 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="text-slate-400 block mb-1">STREAM PROTOCOL:</label>
                   <select
@@ -468,7 +479,7 @@ export const AddCameraModal: React.FC<AddCameraModalProps> = ({ isOpen, onClose,
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label className="text-slate-400 block mb-1">USERNAME (OPTIONAL):</label>
                   <input

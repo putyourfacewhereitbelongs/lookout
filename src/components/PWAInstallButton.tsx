@@ -25,7 +25,8 @@ export const PWAInstallButton: React.FC = () => {
         className="flex items-center gap-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 px-3.5 py-1.5 text-xs font-mono font-medium text-white shadow-md shadow-cyan-900/30 transition cursor-pointer"
       >
         <Download className="w-3.5 h-3.5" />
-        INSTALL PWA
+        <span className="hidden sm:inline">INSTALL PWA</span>
+        <span className="sm:hidden">INSTALL</span>
       </button>
     );
   }
@@ -40,12 +41,13 @@ export const PWAInstallButton: React.FC = () => {
           className="flex items-center gap-2 rounded-lg border border-cyan-800/60 bg-cyan-950/30 hover:bg-cyan-900/40 px-3 py-1.5 text-xs font-mono text-cyan-300 transition cursor-pointer"
         >
           <Smartphone className="w-3.5 h-3.5" />
-          INSTALL ON IOS
+          <span className="hidden sm:inline">INSTALL ON IOS</span>
+          <span className="sm:hidden">INSTALL</span>
         </button>
 
         {showIOSGuide && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-            <div className="w-full max-w-sm rounded-xl bg-slate-900 border border-slate-700 p-6 shadow-2xl text-slate-100">
+          <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+            <div className="mobile-dialog w-full max-w-sm overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-4 text-slate-100 shadow-2xl sm:p-6">
               <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                 <div className="flex items-center gap-2">
                   <Download className="w-5 h-5 text-cyan-400" />

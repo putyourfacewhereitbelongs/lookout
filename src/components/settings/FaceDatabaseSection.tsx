@@ -66,21 +66,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
 
   const [notificationMsg, setNotificationMsg] = useState('');
   const [isSyncingCf, setIsSyncingCf] = useState(false);
-  const [cfSubjects, setCfSubjects] = useState<string[]>([
-    'Aiden',
-    'Alexi',
-    'Amber',
-    'Amberlea',
-    'Breanna',
-    'Brian',
-    'Heather',
-    'Jamie',
-    'Jeff',
-    'Layla',
-    'Malcolm',
-    'Sandra',
-    'Virginia',
-  ]);
+  const [cfSubjects, setCfSubjects] = useState<string[]>([]);
 
   const showToast = (msg: string) => {
     setNotificationMsg(msg);
@@ -92,7 +78,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
     try {
       const subjects = await faceRecognitionService.getSubjects();
       const subjectImages = await faceRecognitionService.getSubjectImages();
-      const finalSubjects = subjects.length > 0 ? subjects : cfSubjects;
+      const finalSubjects = subjects;
       setCfSubjects(finalSubjects);
 
       let addedCount = 0;
@@ -121,7 +107,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
       onFaceProfilesChange(updated);
       showToast(`Synced with CompreFace server: ${finalSubjects.length} subjects registered (${addedCount} added to catalog).`);
     } catch {
-      showToast('CompreFace sync verified: 13 subjects enrolled in database.');
+      showToast('Could not sync CompreFace. Check that the local service is running and COMPREFACE_API_KEY is configured.');
     } finally {
       setIsSyncingCf(false);
     }
@@ -344,13 +330,13 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
                 <span className="font-bold text-white uppercase tracking-wider text-xs">
                   CompreFace Neural Recognition Service
                 </span>
-                <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center gap-1 font-bold">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  ACTIVE & ONLINE
+                <span className="px-2 py-0.5 rounded text-[10px] bg-cyan-950 text-cyan-300 border border-cyan-800 flex items-center gap-1 font-bold">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                  SELF-HOSTED
                 </span>
               </div>
               <p className="text-[10px] text-slate-400 mt-0.5">
-                Endpoint: <span className="text-cyan-400">bolt-collectible-brake-basic.trycloudflare.com</span> • API Key Authenticated
+                Endpoint: <span className="text-cyan-400">LOCAL COMPREFACE VIA LOOKOUT PROXY</span> • Requires configured API key
               </p>
             </div>
           </div>
@@ -378,6 +364,9 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
           </span>
           <span className="px-2 py-0.5 rounded text-[10px] bg-blue-950 border border-blue-800 text-blue-300 font-bold">
             ALWAYS-FOLLOWING PERSON TARGET LOCK
+          </span>
+          <span className="px-2 py-0.5 rounded text-[10px] bg-violet-950 border border-violet-800 text-violet-200 font-bold">
+            LONG-RANGE 3 × 2 FACE SCAN
           </span>
         </div>
 

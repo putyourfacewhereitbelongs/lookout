@@ -1,6 +1,120 @@
 import { CompreFaceDetection, DetectionObject } from '../types';
 
 const PERSON_TRACK_RETENTION_MS = 2200;
+const LONG_RANGE_TILE_COLUMNS = 3;
+const LONG_RANGE_TILE_ROWS = 2;
+const LONG_RANGE_TILE_WIDTH_RATIO = 0.46;
+const LONG_RANGE_TILE_HEIGHT_RATIO = 0.62;
+const LONG_RANGE_TILE_MAX_EDGE = 1600;
+
+export interface FaceTileBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface EncodedFaceTile extends FaceTileBounds {
+  imageBase64: string;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function topSimilarity(detection: CompreFaceDetection): number {
+  return Math.max(0, ...(detection.subjects || []).map((subject) => subject.similarity));
+}
+
+function boxArea(detection: CompreFaceDetection): number {
+  return Math.max(0, detection.box.x_max - detection.box.x_min) * Math.max(0, detection.box.y_max - detection.box.y_min);
+}
+
+function boxIntersectionOverUnion(a: CompreFaceDetection, b: CompreFaceDetection): number {
+  const left = Math.max(a.box.x_min, b.box.x_min);
+  const top = Math.max(a.box.y_min, b.box.y_min);
+  const right = Math.min(a.box.x_max, b.box.x_max);
+  const bottom = Math.min(a.box.y_max, b.box.y_max);
+  const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+  const union = boxArea(a) + boxArea(b) - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+/** Maps a face returned from an enlarged tile back onto the source frame. */
+export function mapDetectionFromTile(
+  detection: CompreFaceDetection,
+  tile: FaceTileBounds,
+  tileImageWidth: number,
+  tileImageHeight: number,
+): CompreFaceDetection {
+  const scaleX = tile.width / Math.max(1, tileImageWidth);
+  const scaleY = tile.height / Math.max(1, tileImageHeight);
+  const mapX = (value: number) => clamp(tile.x + value * scaleX, tile.x, tile.x + tile.width);
+  const mapY = (value: number) => clamp(tile.y + value * scaleY, tile.y, tile.y + tile.height);
+
+  return {
+    ...detection,
+    box: {
+      ...detection.box,
+      x_min: mapX(detection.box.x_min),
+      y_min: mapY(detection.box.y_min),
+      x_max: mapX(detection.box.x_max),
+      y_max: mapY(detection.box.y_max),
+    },
+    landmarks: detection.landmarks?.map(([x, y]) => [mapX(x), mapY(y)] as [number, number]),
+  };
+}
+
+/**
+ * Removes duplicate observations from overlapping long-range tiles. A high
+ * identity similarity wins first; detector confidence resolves the remainder.
+ */
+export function mergeFaceDetections(detections: CompreFaceDetection[]): CompreFaceDetection[] {
+  const candidates = [...detections]
+    .filter((detection) => Number.isFinite(detection.box.x_min) && Number.isFinite(detection.box.y_min) &&
+      Number.isFinite(detection.box.x_max) && Number.isFinite(detection.box.y_max) && boxArea(detection) > 0)
+    .sort((a, b) => {
+      const scoreA = topSimilarity(a) * 4 + a.box.probability;
+      const scoreB = topSimilarity(b) * 4 + b.box.probability;
+      return scoreB - scoreA;
+    });
+  const unique: CompreFaceDetection[] = [];
+
+  for (const candidate of candidates) {
+    const centerX = (candidate.box.x_min + candidate.box.x_max) / 2;
+    const centerY = (candidate.box.y_min + candidate.box.y_max) / 2;
+    const duplicate = unique.some((existing) => {
+      if (boxIntersectionOverUnion(candidate, existing) >= 0.3) return true;
+      const existingCenterX = (existing.box.x_min + existing.box.x_max) / 2;
+      const existingCenterY = (existing.box.y_min + existing.box.y_max) / 2;
+      const comparableScale = Math.max(10, Math.min(
+        candidate.box.x_max - candidate.box.x_min,
+        candidate.box.y_max - candidate.box.y_min,
+        existing.box.x_max - existing.box.x_min,
+        existing.box.y_max - existing.box.y_min,
+      ));
+      return Math.hypot(centerX - existingCenterX, centerY - existingCenterY) < comparableScale * 0.35;
+    });
+    if (!duplicate) unique.push(candidate);
+  }
+
+  return unique;
+}
+
+/** Long-range tiles are useful only for absent or genuinely small detections. */
+export function shouldRunLongRangeTiles(
+  detections: CompreFaceDetection[],
+  frameWidth: number,
+  frameHeight: number,
+): boolean {
+  if (!detections.length) return true;
+  const smallFaceWidth = Math.max(32, frameWidth * 0.12);
+  const smallFaceHeight = Math.max(32, frameHeight * 0.12);
+  return detections.some((detection) =>
+    detection.box.x_max - detection.box.x_min < smallFaceWidth ||
+    detection.box.y_max - detection.box.y_min < smallFaceHeight
+  );
+}
 
 export class FaceRecognitionService {
   private static instance: FaceRecognitionService;
@@ -18,29 +132,15 @@ export class FaceRecognitionService {
     return FaceRecognitionService.instance;
   }
 
-  /**
-   * Calls CompreFace through the backend proxy with landmarks only to reduce inference time.
-   */
+  /** Calls CompreFace through the backend proxy with landmarks only. */
   async recognize(imageBase64: string): Promise<CompreFaceDetection[]> {
     if (this.isProcessing) return [];
     this.isProcessing = true;
 
     try {
-      const res = await fetch('/api/recognition/recognize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        this.lastRecognitionError = data.error || `Recognition request failed (${res.status}).`;
-        return [];
-      }
-
-      const data = await res.json();
+      const result = await this.requestRecognition(imageBase64, 'standard');
       this.lastRecognitionError = '';
-      return Array.isArray(data.result) ? data.result : [];
+      return result;
     } catch (err) {
       this.lastRecognitionError = err instanceof Error ? err.message : 'Recognition service is unavailable.';
       console.warn('FaceRecognition recognize error:', err);
@@ -50,33 +150,150 @@ export class FaceRecognitionService {
     }
   }
 
+  /**
+   * Performs a normal recognition pass plus an overlapping 3 × 2 tiled pass
+   * for tiny/absent faces. Each tile is enlarged before it reaches the face
+   * detector, preserving source pixels while preventing its internal resize
+   * step from discarding distant-face detail.
+   */
+  async recognizeAtLongRange(
+    imageBase64: string,
+    sourceFrame: HTMLCanvasElement,
+  ): Promise<CompreFaceDetection[]> {
+    if (this.isProcessing) return [];
+    this.isProcessing = true;
+
+    try {
+      const primary = await this.requestRecognition(imageBase64, 'standard');
+      if (!shouldRunLongRangeTiles(primary, sourceFrame.width, sourceFrame.height)) {
+        this.lastRecognitionError = '';
+        return primary;
+      }
+
+      const tiles = this.createLongRangeTiles(sourceFrame);
+      const expandedDetections: CompreFaceDetection[] = [];
+      // Two concurrent requests keep a distant scan responsive without
+      // monopolizing a self-hosted CompreFace deployment.
+      for (let start = 0; start < tiles.length; start += 2) {
+        const results = await Promise.all(tiles.slice(start, start + 2).map(async (tile) => {
+          try {
+            const detections = await this.requestRecognition(tile.imageBase64, 'distant');
+            return detections.map((detection) => mapDetectionFromTile(detection, tile, tile.imageWidth, tile.imageHeight));
+          } catch (error) {
+            // A single slow tile should not discard normal-pass results or
+            // create a synthetic target. The next scheduled scan can retry it.
+            console.warn('Long-range face tile failed:', error);
+            return [] as CompreFaceDetection[];
+          }
+        }));
+        results.forEach((detections) => expandedDetections.push(...detections));
+      }
+
+      this.lastRecognitionError = '';
+      return mergeFaceDetections([...primary, ...expandedDetections]);
+    } catch (err) {
+      this.lastRecognitionError = err instanceof Error ? err.message : 'Recognition service is unavailable.';
+      console.warn('FaceRecognition long-range scan error:', err);
+      return [];
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  private async requestRecognition(imageBase64: string, detectionProfile: 'standard' | 'distant'): Promise<CompreFaceDetection[]> {
+    const res = await fetch('/api/recognition/recognize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageBase64, detectionProfile }),
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Recognition request failed (${res.status}).`);
+    }
+
+    const data = await res.json();
+    return Array.isArray(data.result) ? data.result : [];
+  }
+
+  private createLongRangeTiles(sourceFrame: HTMLCanvasElement): Array<EncodedFaceTile & { imageWidth: number; imageHeight: number }> {
+    const sourceWidth = sourceFrame.width;
+    const sourceHeight = sourceFrame.height;
+    if (sourceWidth < 96 || sourceHeight < 96) return [];
+
+    const sourceTileWidth = Math.max(48, Math.round(sourceWidth * LONG_RANGE_TILE_WIDTH_RATIO));
+    const sourceTileHeight = Math.max(48, Math.round(sourceHeight * LONG_RANGE_TILE_HEIGHT_RATIO));
+    const xPositions = Array.from({ length: LONG_RANGE_TILE_COLUMNS }, (_, index) =>
+      Math.round(index * (sourceWidth - sourceTileWidth) / Math.max(1, LONG_RANGE_TILE_COLUMNS - 1))
+    );
+    const yPositions = Array.from({ length: LONG_RANGE_TILE_ROWS }, (_, index) =>
+      Math.round(index * (sourceHeight - sourceTileHeight) / Math.max(1, LONG_RANGE_TILE_ROWS - 1))
+    );
+    const tiles: Array<EncodedFaceTile & { imageWidth: number; imageHeight: number }> = [];
+
+    for (const y of [...new Set(yPositions)]) {
+      for (const x of [...new Set(xPositions)]) {
+        const scale = Math.min(2, LONG_RANGE_TILE_MAX_EDGE / Math.max(sourceTileWidth, sourceTileHeight));
+        const imageWidth = Math.max(48, Math.round(sourceTileWidth * scale));
+        const imageHeight = Math.max(48, Math.round(sourceTileHeight * scale));
+        const tileCanvas = document.createElement('canvas');
+        tileCanvas.width = imageWidth;
+        tileCanvas.height = imageHeight;
+        const context = tileCanvas.getContext('2d');
+        if (!context) continue;
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
+        context.drawImage(sourceFrame, x, y, sourceTileWidth, sourceTileHeight, 0, 0, imageWidth, imageHeight);
+        try {
+          tiles.push({
+            x,
+            y,
+            width: sourceTileWidth,
+            height: sourceTileHeight,
+            imageWidth,
+            imageHeight,
+            imageBase64: tileCanvas.toDataURL('image/jpeg', 0.92),
+          });
+        } catch (error) {
+          // Cross-origin camera frames can block encoding. The normal pass is
+          // still valid, and no guessed long-range face is created.
+          console.warn('Long-range face tile could not be encoded:', error);
+        }
+      }
+    }
+
+    return tiles;
+  }
+
   isReliableMatch(detection: CompreFaceDetection, threshold: number): boolean {
     const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    return Boolean(best && best.similarity >= Math.max(0.90, threshold) &&
-      (!runnerUp || best.similarity - runnerUp.similarity >= 0.08));
+    // Honor the "Sensitive" setting while keeping a meaningful floor and a
+    // clear lead over the next enrolled identity. This is especially important
+    // for small distant faces whose embedding score is naturally lower.
+    const requiredSimilarity = Math.max(0.85, Math.min(0.99, threshold));
+    return Boolean(best && best.similarity >= requiredSimilarity &&
+      (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
   }
 
   /**
    * Fetch all registered subjects from CompreFace database
    */
   async getSubjects(): Promise<string[]> {
-    try {
-      const res = await fetch('/api/recognition/subjects');
-      const data = await res.json();
-      return data.subjects || [];
-    } catch {
-      return [];
+    const res = await fetch('/api/recognition/subjects');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `CompreFace subjects request failed (${res.status}).`);
     }
+    return Array.isArray(data.subjects) ? data.subjects : [];
   }
 
   async getSubjectImages(): Promise<Record<string, string>> {
-    try {
-      const res = await fetch('/api/recognition/subject-images');
-      const data = await res.json();
-      return data.images || {};
-    } catch {
-      return {};
+    const res = await fetch('/api/recognition/subject-images');
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `CompreFace face-images request failed (${res.status}).`);
     }
+    return data.images && typeof data.images === 'object' ? data.images : {};
   }
 
   /**
@@ -111,29 +328,10 @@ export class FaceRecognitionService {
     } catch (err: any) {
       return {
         online: false,
-        endpoint: 'https://bolt-collectible-brake-basic.trycloudflare.com',
+        endpoint: '',
         subjectCount: 0,
         subjects: [],
       };
-    }
-  }
-
-  /**
-   * Calls the server's vision-backed object detection endpoint.
-   */
-  async detectObjects(imageBase64: string): Promise<DetectionObject[]> {
-    try {
-      const res = await fetch('/api/vision/detect-objects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64 }),
-      });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return Array.isArray(data.objects) ? data.objects : [];
-    } catch (err) {
-      console.warn('Real object detection error:', err);
-      return [];
     }
   }
 
@@ -178,12 +376,14 @@ export class FaceRecognitionService {
       const targetW = Math.min(1 - targetX, fw * 1.16);
       const targetH = Math.min(1 - targetY, fh * 1.20);
       const targetBbox: [number, number, number, number] = [targetX, targetY, targetW, targetH];
-      // The HUD remains head-sized; segmentation gets more surrounding pixels
-      // so it can trace the person's visible head and upper body from the frame.
-      const silhouetteX = clamp(fx - fw * 0.75);
-      const silhouetteY = clamp(fy - fh * 0.14);
-      const silhouetteW = Math.min(1 - silhouetteX, fw * 2.5);
-      const silhouetteH = Math.min(1 - silhouetteY, fh * 4.2);
+      // The HUD remains head-sized. Semantic segmentation gets a generous
+      // person-sized crop so it can retain the visible body, arms, and legs.
+      // This is input context only: the renderer never displays this rectangle
+      // unless the segmentation model returns actual subject pixels.
+      const silhouetteX = clamp(fx - fw * 1.10);
+      const silhouetteY = clamp(fy - fh * 0.32);
+      const silhouetteW = Math.min(1 - silhouetteX, fw * 3.20);
+      const silhouetteH = Math.min(1 - silhouetteY, fh * 9.00);
       const targetSilhouetteBbox: [number, number, number, number] = [silhouetteX, silhouetteY, silhouetteW, silhouetteH];
 
       // Normalize facial landmarks (5 points)
@@ -195,8 +395,6 @@ export class FaceRecognitionService {
       // Check subject match
       const rankedSubjects = [...(d.subjects || [])].sort((a, b) => b.similarity - a.similarity);
       const topSubject = rankedSubjects[0] || null;
-      // Similarity scores from face APIs can be optimistic for tiny, blurry,
-      // or profile-view faces. Require a high absolute score and a clear lead.
       const isRecognized = this.isReliableMatch(d, matchThreshold);
       const isRecognizedAnimal = Boolean(
         isRecognized && topSubject && animalNames.some((name) => name.toLowerCase() === topSubject.subject.toLowerCase())
