@@ -269,7 +269,7 @@ export function App() {
   }, [detectedObjects, deliveryPending]);
 
   // Save changes to local database
-  useEffect(() => { 
+  useEffect(() => {
     StorageService.saveCameras(cameras);
   }, [cameras]);
 
@@ -490,7 +490,7 @@ export function App() {
   };
 
   // Continuous CompreFace Facial Recognition Cycle:
-  // Low-latency neural face recognition via CompreFace proxy, 
+  // Low-latency neural face recognition via CompreFace proxy,
   // identifies registered subjects ("Brian", "Heather", "Malcolm", etc.), and always follows the person.
   useEffect(() => {
     let isMounted = true;
