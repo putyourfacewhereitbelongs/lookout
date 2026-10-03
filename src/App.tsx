@@ -61,6 +61,7 @@ import { RecordingsLibrary } from './components/RecordingsLibrary';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
+import { motion } from 'motion/react';
 
 // Real camera feeds: Local integrated hardware lens and Screen Capture
 const INITIAL_CAMERAS: CameraSource[] = [
@@ -1000,9 +1001,19 @@ export function App() {
       </div>
 
       {/* MAIN VIEWPORT CONTAINER */}
-      <main className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5">
+      <motion.main
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: 'spring', stiffness: 180, damping: 24, mass: 0.8 }}
+        className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5"
+      >
         {/* PRIMARY DVR STAGE & CANVAS */}
-        <div ref={streamStageRef} className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none">
+        <motion.div
+          ref={streamStageRef}
+          layout
+          transition={{ type: 'spring', stiffness: 240, damping: 26 }}
+          className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none"
+        >
           {/* HD 30 FPS Render Canvas; source video remains native-resolution for exports */}
           <canvas
             ref={canvasRef}
@@ -1058,7 +1069,7 @@ export function App() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
-        </div>
+        </motion.div>
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
         <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">
@@ -1256,7 +1267,7 @@ export function App() {
             onClose={() => setActivePanel('none')}
           />
         )}
-      </main>
+      </motion.main>
 
       {/* FOOTER */}
       <footer className="mt-auto flex flex-col items-center justify-between gap-2 border-t border-slate-800 bg-slate-950 px-3 py-4 text-center font-mono text-[11px] text-slate-500 sm:flex-row sm:px-6 sm:text-xs">
