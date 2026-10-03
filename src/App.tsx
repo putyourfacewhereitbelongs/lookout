@@ -48,6 +48,7 @@ import { StorageService } from './services/db';
 import { audioEngine } from './services/audioEngine';
 import { videoProcessor } from './services/videoProcessor';
 import { faceRecognitionService } from './services/faceRecognitionService';
+import { liveSyncService } from './services/liveSyncService';
 import { petRecognitionService } from './services/petRecognitionService';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
 
@@ -218,8 +219,22 @@ export function App() {
 
   useEffect(() => {
     const splashTimer = window.setTimeout(() => setIsBooting(false), 900);
-    return () => window.clearTimeout(splashTimer);
+    liveSyncService.connect();
+    const unsubscribe = liveSyncService.subscribe((payload) => {
+      try {
+        const state = JSON.parse(payload);
+        if (Array.isArray(state.faces)) {
+          StorageService.saveFaceProfiles(state.faces);
+          setFaceProfiles(state.faces);
+        }
+      } catch { /* Ignore invalid peer state. */ }
+    });
+    return () => { window.clearTimeout(splashTimer); unsubscribe(); };
   }, []);
+
+  useEffect(() => {
+    liveSyncService.publish(JSON.stringify({ faces: faceProfiles }));
+  }, [faceProfiles]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px), (pointer: coarse)');

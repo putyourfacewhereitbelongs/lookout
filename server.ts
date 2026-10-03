@@ -1,9 +1,11 @@
 import express from 'express';
+import { createServer } from 'node:http';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
+import { WebSocketServer, WebSocket } from 'ws';
 
 dotenv.config();
 
@@ -37,6 +39,15 @@ function getLocalNetworkIp(): string {
 
 // In-memory sync store for multi-device sync
 let sharedSyncStore: { timestamp: number; payload: string; deviceId: string } | null = null;
+const SYNC_TOKEN = process.env.LOOKOUT_SYNC_TOKEN?.trim() || '';
+const syncClients = new Set<WebSocket>();
+
+function broadcastSync(message: unknown, except?: WebSocket): void {
+  const encoded = JSON.stringify(message);
+  for (const client of syncClients) {
+    if (client !== except && client.readyState === WebSocket.OPEN) client.send(encoded);
+  }
+}
 
 // CompreFace Facial Detection & Recognition configuration. The Compose stack
 // provides the internal URL; a standalone local server defaults to its UI port.
@@ -398,6 +409,7 @@ app.post('/api/sync/push', (req, res) => {
     deviceId: deviceId || 'anonymous_station',
     payload,
   };
+  broadcastSync({ type: 'state', ...sharedSyncStore });
   res.json({ success: true, timestamp: sharedSyncStore.timestamp });
 });
 
@@ -411,6 +423,33 @@ app.get('/api/sync/pull', (req, res) => {
     deviceId: sharedSyncStore.deviceId,
     payload: sharedSyncStore.payload,
   });
+});
+
+// One low-latency WebSocket room backs the QR-linked portal sessions. Set
+// LOOKOUT_SYNC_TOKEN in production; without it, local development remains
+// convenient but should not be exposed to an untrusted network.
+const httpServer = createServer(app);
+const syncWss = new WebSocketServer({ server: httpServer, path: '/ws' });
+syncWss.on('connection', (socket, request) => {
+  const token = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`).searchParams.get('token') || '';
+  if (SYNC_TOKEN && token !== SYNC_TOKEN) {
+    socket.close(1008, 'Sync authentication required');
+    return;
+  }
+  syncClients.add(socket);
+  if (sharedSyncStore) socket.send(JSON.stringify({ type: 'state', ...sharedSyncStore }));
+  socket.on('message', (raw) => {
+    try {
+      const message = JSON.parse(raw.toString());
+      if (message?.type !== 'state' || typeof message.payload !== 'string' || message.payload.length > 8_000_000) return;
+      sharedSyncStore = { timestamp: Date.now(), deviceId: String(message.deviceId || 'portal'), payload: message.payload };
+      broadcastSync({ type: 'state', ...sharedSyncStore }, socket);
+    } catch {
+      socket.close(1003, 'Invalid sync message');
+    }
+  });
+  socket.on('close', () => syncClients.delete(socket));
+  socket.on('error', () => syncClients.delete(socket));
 });
 
 // --- VITE DEV / PRODUCTION MIDDLEWARE ---
@@ -429,7 +468,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Lookout AI DVR Server running on http://0.0.0.0:${PORT}`);
   });
 }
