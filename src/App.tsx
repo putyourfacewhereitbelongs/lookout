@@ -48,12 +48,8 @@ import { StorageService } from './services/db';
 import { audioEngine } from './services/audioEngine';
 import { videoProcessor } from './services/videoProcessor';
 import { faceRecognitionService } from './services/faceRecognitionService';
-import {
-  captureNativeHdFrame,
-  captureSharpNativeFrame,
-  createHdFaceReference,
-  HD_FACE_MAX_WIDTH,
-} from './services/hdFaceCapture';
+import { liveSyncService } from './services/liveSyncService';
+import { petRecognitionService } from './services/petRecognitionService';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -66,6 +62,8 @@ import { RecordingsLibrary } from './components/RecordingsLibrary';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
+import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
+import { motion } from 'motion/react';
 
 // Real camera feeds: Local integrated hardware lens and Screen Capture
 const INITIAL_CAMERAS: CameraSource[] = [
@@ -75,7 +73,7 @@ const INITIAL_CAMERAS: CameraSource[] = [
     type: 'local',
     status: 'online',
     isRecording: false,
-    fps: 30,
+    fps: 60,
   },
   {
     id: 'cam-screen-01',
@@ -83,7 +81,7 @@ const INITIAL_CAMERAS: CameraSource[] = [
     type: 'screen',
     status: 'online',
     isRecording: false,
-    fps: 30,
+    fps: 60,
   },
 ];
 
@@ -104,9 +102,13 @@ export function App() {
   const [recordings, setRecordings] = useState<SavedRecording[]>(StorageService.getRecordings());
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>(StorageService.getHistoryEvents());
   const [liveAlert, setLiveAlert] = useState('');
+  const [visualAlertFrame, setVisualAlertFrame] = useState('');
+  const [deliveryPending, setDeliveryPending] = useState(() => typeof window !== 'undefined' && localStorage.getItem('lookout_delivery_pending') === 'true');
+  const [deliveryDescription, setDeliveryDescription] = useState('Delivery vehicle or package activity detected; package may be outside the camera view.');
   const [cameraFeedError, setCameraFeedError] = useState('');
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [faceProfiles, setFaceProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
+  const [sceneOverlayEnabled, setSceneOverlayEnabled] = useState(true);
 
   // Advanced Settings State
   const [detectionSensitivities, setDetectionSensitivities] = useState<DetectionSensitivities>(
@@ -133,6 +135,7 @@ export function App() {
   const [isPhone, setIsPhone] = useState(() =>
     typeof window !== 'undefined' && window.matchMedia('(max-width: 767px), (pointer: coarse)').matches
   );
+  const [isBooting, setIsBooting] = useState(true);
 
   // State: Modals & Panels
   const [showQRModal, setShowQRModal] = useState(false);
@@ -146,6 +149,7 @@ export function App() {
   const streamStageRef = useRef<HTMLDivElement | null>(null);
   const [isRecordingNow, setIsRecordingNow] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingSceneDescription, setRecordingSceneDescription] = useState('');
   const [fpsDisplay, setFpsDisplay] = useState(60);
 
   // References
@@ -153,6 +157,10 @@ export function App() {
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const autoFaceRecordingRef = useRef(false);
+  const lastFaceSeenAtRef = useRef(0);
+  const lastLongRangeScanAtRef = useRef(0);
+  const lastFaceAlertAtRef = useRef(0);
   const activeCamera = cameras.find((c) => c.id === activeCamId) || cameras[0];
   const eventCooldownsRef = useRef<Map<string, number>>(new Map());
   const faceApproachRef = useRef<Map<string, { baseHeight: number; maxHeight: number; lastSeen: number; approachLogged: boolean }>>(new Map());
@@ -210,12 +218,55 @@ export function App() {
   }, [activeCamera, activeCamId]);
 
   useEffect(() => {
+    const splashTimer = window.setTimeout(() => setIsBooting(false), 900);
+    liveSyncService.connect();
+    const unsubscribe = liveSyncService.subscribe((payload) => {
+      try {
+        const state = JSON.parse(payload);
+        if (Array.isArray(state.faces)) {
+          StorageService.saveFaceProfiles(state.faces);
+          setFaceProfiles(state.faces);
+        }
+      } catch { /* Ignore invalid peer state. */ }
+    });
+    return () => { window.clearTimeout(splashTimer); unsubscribe(); };
+  }, []);
+
+  useEffect(() => {
+    liveSyncService.publish(JSON.stringify({ faces: faceProfiles }));
+  }, [faceProfiles]);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px), (pointer: coarse)');
     const updateDeviceMode = () => setIsPhone(mediaQuery.matches);
     updateDeviceMode();
     mediaQuery.addEventListener?.('change', updateDeviceMode);
     return () => mediaQuery.removeEventListener?.('change', updateDeviceMode);
   }, []);
+
+  // Restore video bytes from IndexedDB after the lightweight recording metadata
+  // has loaded from localStorage. Object URLs are session-only, so this is what
+  // makes DVR clips playable after a page reload.
+  useEffect(() => {
+    let active = true;
+    StorageService.hydrateRecordings(StorageService.getRecordings()).then((saved) => {
+      if (active) setRecordings(saved);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const deliverySubject = detectedObjects.find((object) => /(?:ups|u\.?s\.?ps|fed.?ex|amazon|usps|postal|mail|delivery|courier|package|parcel|box|truck|van)/i.test(`${object.label} ${object.nameTag || ''}`));
+    if (!deliverySubject || deliveryPending) return;
+    const description = /package|parcel|box/i.test(deliverySubject.label)
+      ? 'Package activity detected; it may have been placed outside the current camera view.'
+      : `${deliverySubject.label} detected; a delivery package may arrive or be placed outside the camera view.`;
+    setDeliveryDescription(description);
+    setDeliveryPending(true);
+    localStorage.setItem('lookout_delivery_pending', 'true');
+    setLiveAlert(`DELIVERY ALERT — ${description}`);
+    audioEngine.playAlertTone('perimeter_horn', 1);
+  }, [detectedObjects, deliveryPending]);
 
   // Save changes to local database
   useEffect(() => {
@@ -283,35 +334,18 @@ export function App() {
         attachStream(activeCamera.stream);
       } else if (activeCamera.type === 'local') {
         try {
-          // Ask the camera for real HD pixels. 30 FPS is deliberate: many
-          // inexpensive webcams silently fall back to 640px when 60 FPS is
-          // requested, which is the main source of blurry face references.
-          const preferredVideo: MediaTrackConstraints = isPhone
-            ? { width: { ideal: 1280, min: 960, max: 1920 }, height: { ideal: 720, min: 540, max: 1080 }, frameRate: { ideal: 30, max: 30 } }
-            : { width: { ideal: 1920, min: 1280, max: 1920 }, height: { ideal: 1080, min: 720, max: 1080 }, frameRate: { ideal: 30, max: 30 } };
-          const fallbackVideo: MediaTrackConstraints = isPhone
-            ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }
-            : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } };
+          const video = isPhone
+            ? { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 30, max: 30 } }
+            : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
           let s: MediaStream;
           try {
-            s = await navigator.mediaDevices.getUserMedia({ video: preferredVideo, audio: false });
+            s = await navigator.mediaDevices.getUserMedia({
+              video,
+              audio: false,
+            });
           } catch {
-            // Some older drivers reject min/max combinations even though they
-            // can produce HD. Retry with ideal-only constraints before showing
-            // an error instead of silently choosing a low-resolution profile.
-            s = await navigator.mediaDevices.getUserMedia({ video: fallbackVideo, audio: false });
-          }
-          const track = s.getVideoTracks()[0];
-          if (track) {
-            try {
-              // Continuous focus/exposure are best-effort capabilities. Do not
-              // replace the working stream when a camera does not expose them.
-              await track.applyConstraints({
-                advanced: [{ focusMode: 'continuous', exposureMode: 'continuous', whiteBalanceMode: 'continuous' }],
-              } as unknown as MediaTrackConstraints);
-            } catch {
-              // The requested resolution remains valid without these controls.
-            }
+            // Preserve the camera feed on devices without an available microphone.
+            s = await navigator.mediaDevices.getUserMedia({ video, audio: false });
           }
           currentStream = s;
           attachStream(s);
@@ -430,6 +464,31 @@ export function App() {
     };
   }, [isPhone]);
 
+  const syncFaceTriggeredDvr = (faceDetected: boolean) => {
+    const now = Date.now();
+    if (faceDetected) {
+      lastFaceSeenAtRef.current = now;
+      if (!autoFaceRecordingRef.current && (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive')) {
+        document.getElementById('record-toggle-btn')?.click();
+        autoFaceRecordingRef.current = true;
+        audioEngine.playAlertTone('perimeter_horn', 1);
+      }
+      if (now - lastFaceAlertAtRef.current > 3500) {
+        lastFaceAlertAtRef.current = now;
+        const frame = canvasRef.current;
+        if (frame) setVisualAlertFrame(frame.toDataURL('image/jpeg', 0.88));
+        setLiveAlert('FACE DETECTED — DVR RECORDING ACTIVE');
+        window.setTimeout(() => setLiveAlert((current) => current === 'FACE DETECTED — DVR RECORDING ACTIVE' ? '' : current), 2200);
+      }
+    } else if (autoFaceRecordingRef.current && now - lastFaceSeenAtRef.current > 2400) {
+      document.getElementById('record-toggle-btn')?.click();
+      autoFaceRecordingRef.current = false;
+      audioEngine.playAlertTone('radar_ping', 1);
+      setLiveAlert('FACE LEFT SCENE — DVR CLIP SAVING');
+      window.setTimeout(() => setLiveAlert((current) => current === 'FACE LEFT SCENE — DVR CLIP SAVING' ? '' : current), 2200);
+    }
+  };
+
   // Continuous CompreFace Facial Recognition Cycle:
   // Low-latency neural face recognition via CompreFace proxy,
   // identifies registered subjects ("Brian", "Heather", "Malcolm", etc.), and always follows the person.
@@ -446,25 +505,35 @@ export function App() {
 
       const video = videoElementRef.current;
       let snapshotBase64 = '';
-      let snapW = 1280;
-      let snapH = 720;
+      let snapW = 640;
+      let snapH = 270;
       let recognitionCanvas: HTMLCanvasElement | null = null;
 
-      // Recognition receives the native camera frame at HD (up to 1920x1080),
-      // not the small 640px display sample. CompreFace may resize internally,
-      // but sending the source pixels gives its detector the largest possible
-      // face detail and prevents distant faces from becoming pre-blurred.
+      // Keep normal recognition inexpensive. On the scheduled long-range pass,
+      // preserve materially more of the desktop camera's native detail before
+      // splitting it into enlarged face tiles. Phones retain their lighter
+      // capture policy for live responsiveness.
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
-        const frame = captureNativeHdFrame(video, isPhone ? 1280 : HD_FACE_MAX_WIDTH, 0.92);
-        if (frame) {
-          recognitionCanvas = frame.canvas;
-          snapW = frame.width;
-          snapH = frame.height;
-          snapshotBase64 = frame.imageBase64;
+        const offscreen = document.createElement('canvas');
+        recognitionCanvas = offscreen;
+        // Keep recognition detailed enough for small faces while staying below
+        // the expensive full-resolution camera frame.
+        const maximumWidth = isPhone ? 960 : 1280;
+        snapW = Math.min(maximumWidth, video.videoWidth);
+        snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
+        offscreen.width = snapW;
+        offscreen.height = snapH;
+        const ctx = offscreen.getContext('2d');
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(video, 0, 0, snapW, snapH);
+          snapshotBase64 = offscreen.toDataURL('image/jpeg', isPhone ? 0.82 : 0.90);
         }
       }
 
       if (!snapshotBase64) {
+        syncFaceTriggeredDvr(false);
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
       }
@@ -475,7 +544,30 @@ export function App() {
       }
 
       try {
-        const detections = await faceRecognitionService.recognize(snapshotBase64);
+        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1800;
+        if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
+        let detections = useLongRange && recognitionCanvas
+          ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
+          : await faceRecognitionService.recognize(snapshotBase64);
+        // Borderline identities get a second independent inference on the same
+        // high-resolution frame. A name survives only when both checks agree;
+        // a disagreement becomes an unknown face instead of a false alert.
+        const needsSecondCheck = detections.some((detection) => (detection.subjects?.[0]?.similarity || 0) < 0.96 && (detection.subjects?.length || 0) > 0);
+        if (needsSecondCheck) {
+          const secondPass = await faceRecognitionService.recognize(snapshotBase64);
+          detections = detections.map((detection) => {
+            const firstSubject = detection.subjects?.[0];
+            if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
+            const corroborating = secondPass.find((candidate) => {
+              const secondSubject = candidate.subjects?.[0];
+              const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
+              const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
+              return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < 90;
+            });
+            return corroborating ? { ...detection, subjects: [corroborating.subjects![0]] } : { ...detection, subjects: [] };
+          });
+        }
+        syncFaceTriggeredDvr(detections.length > 0);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
@@ -485,17 +577,23 @@ export function App() {
             detections,
             snapW,
             snapH,
-            storagePreferences.faceMatchThreshold || 0.84,
+            Math.max(0.97, storagePreferences.faceMatchThreshold || 0.92),
             StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
           );
           detectedObjectsRef.current = updated;
           setDetectedObjects([...updated]);
 
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
-          detections.forEach((d) => {
+          for (const d of detections) {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
-            if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.84)) {
+            if (topSubj && faceRecognitionService.isConservativeMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
+              const matchedProfile = StorageService.getFaceProfiles().find((profile) => profile.name.toLowerCase() === topSubj.subject.toLowerCase());
+              const isIntruder = matchedProfile?.role === 'intruder';
               StorageService.updateFaceLastSeenByName(topSubj.subject);
+              if (isIntruder) {
+                setLiveAlert(`INTRUDER ALERT — ${topSubj.subject} is present`);
+                audioEngine.playAlertTone('intruder_siren', 1);
+              }
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
               const now = Date.now();
               const faceHeight = Math.max(0, d.box.y_max - d.box.y_min) / snapH;
@@ -508,6 +606,7 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `face:${identityKey}`, 60_000);
+                showScanFeedback(`${topSubj.subject} arrived or is present in the monitored scene.`);
               } else {
                 const approached = !previous.approachLogged && previous.baseHeight > 0 && faceHeight >= previous.baseHeight * 1.5 && faceHeight - previous.baseHeight >= 0.035;
                 faceApproachRef.current.set(identityKey, {
@@ -527,19 +626,97 @@ export function App() {
             } else {
               let faceCrop: string | undefined;
               if (recognitionCanvas && d.box) {
-                // Store a crop from the same native HD frame that produced the
-                // detection. Small 192px crops made the old enrollment photos
-                // permanently blurry, even when the webcam itself was sharp.
-                faceCrop = createHdFaceReference(recognitionCanvas, d.box)?.imageBase64;
+                // Recognition intentionally uses a compact frame, but the saved
+                // snapshot should come from the camera's native pixels. The old
+                // 192px crop was both soft and stretched when a face box was not
+                // square. Build a padded square in recognition coordinates, map
+                // it back to the native video, and only then upscale it to a
+                // consistent HD-ish profile image.
+                const faceWidth = d.box.x_max - d.box.x_min;
+                const faceHeight = d.box.y_max - d.box.y_min;
+                const paddingX = faceWidth * 0.28;
+                const paddingY = faceHeight * 0.28;
+                const paddedWidth = faceWidth + paddingX * 2;
+                const paddedHeight = faceHeight + paddingY * 2;
+                const squareSize = Math.max(paddedWidth, paddedHeight);
+                const centerX = (d.box.x_min + d.box.x_max) / 2;
+                const centerY = (d.box.y_min + d.box.y_max) / 2;
+                const sx = Math.max(0, Math.min(snapW - squareSize, centerX - squareSize / 2));
+                const sy = Math.max(0, Math.min(snapH - squareSize, centerY - squareSize / 2));
+                const cropSize = Math.min(squareSize, snapW - sx, snapH - sy);
+                if (cropSize > 0) {
+                  const source = video && video.videoWidth > 0 ? video : recognitionCanvas;
+                  const sourceWidth = source === video ? video.videoWidth : snapW;
+                  const sourceHeight = source === video ? video.videoHeight : snapH;
+                  const scaleX = sourceWidth / snapW;
+                  const scaleY = sourceHeight / snapH;
+                  const cropCanvas = document.createElement('canvas');
+                  // A 1024px square keeps the profile sharp on HD/retina
+                  // displays, while the native video remains the source of truth.
+                  const outputSize = 1024;
+                  cropCanvas.width = outputSize;
+                  cropCanvas.height = outputSize;
+                  const cropContext = cropCanvas.getContext('2d');
+                  if (cropContext) {
+                    cropContext.imageSmoothingEnabled = true;
+                    cropContext.imageSmoothingQuality = 'high';
+                    cropContext.drawImage(
+                      source,
+                      sx * scaleX,
+                      sy * scaleY,
+                      cropSize * scaleX,
+                      cropSize * scaleY,
+                      0,
+                      0,
+                      outputSize,
+                      outputSize
+                    );
+                    faceCrop = cropCanvas.toDataURL('image/jpeg', 0.94);
+                  }
+                }
+              }
+              // Animal profiles are recognized locally against their enrolled
+              // reference photos, independently of CompreFace's human-face
+              // database. This turns the existing animal album into a true pet
+              // recognition path rather than only a manual label.
+              if (faceCrop) {
+                const petMatch = await petRecognitionService.match(faceCrop, StorageService.getFaceProfiles());
+                if (petMatch) {
+                  const animalDetection = {
+                    ...d,
+                    subjects: [{ subject: petMatch.profile.name, similarity: petMatch.similarity }],
+                  };
+                  const animalUpdated = faceRecognitionService.correlateDetections(
+                    detectedObjectsRef.current,
+                    [animalDetection],
+                    snapW,
+                    snapH,
+                    0.85,
+                    StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
+                  );
+                  detectedObjectsRef.current = animalUpdated;
+                  setDetectedObjects([...animalUpdated]);
+                  StorageService.updateFaceLastSeenByName(petMatch.profile.name);
+                  recordHistoryEvent({
+                    type: 'animal_detected',
+                    title: `${petMatch.profile.name} recognized`,
+                    details: `${petMatch.profile.name} was recognized locally from its enrolled animal reference photos.`,
+                    severity: 'info',
+                    subjectName: petMatch.profile.name,
+                    confidence: petMatch.similarity,
+                  }, `animal:${activeCamId}:${petMatch.profile.name}`, 60_000);
+                  showScanFeedback(`${petMatch.profile.name} was recognized in the monitored yard or driveway.`);
+                  continue;
+                }
               }
               StorageService.catalogUnknownFace(
                 'Unknown Subject',
                 'person',
-                'Sharp HD face capture from the native camera frame. Review and assign to a person.',
+                'Face captured from CompreFace detection. Review and assign to a person, or save it as an animal profile for local pet recognition.',
                 faceCrop
               );
             }
-          });
+          }
           setFaceProfiles(StorageService.getFaceProfiles());
         }
       } catch (err) {
@@ -574,6 +751,30 @@ export function App() {
     return () => clearInterval(interval);
   }, [isRecordingNow]);
 
+  const buildSceneDescription = () => {
+    const visibleSubjects = detectedObjects
+      .map((object) => object.subjectName || object.nameTag || object.label)
+      .filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .slice(0, 8);
+    const people = detectedObjects.filter((object) => object.category === 'person');
+    const animals = detectedObjects.filter((object) => object.category === 'animal');
+    const packageObject = detectedObjects.find((object) => /package|parcel|box|delivery/i.test(object.label));
+    if (packageObject) return `${activeCamera.name}: a package or delivery is visible at the monitored entry area`;
+    if (people.length > 1) {
+      const names = people.map((person) => person.subjectName || 'an unidentified person');
+      return `${activeCamera.name}: ${names[0]} appears to be talking with ${names.slice(1).join(' and ')}`;
+    }
+    if (people[0]?.subjectName) return `${activeCamera.name}: ${people[0].subjectName} is ${people[0].posture || 'present'} in the yard or driveway scene`;
+    if (people.length) return `${activeCamera.name}: a person is ${people[0].posture || 'moving'} through the monitored yard or driveway`;
+    if (animals.length) return `${activeCamera.name}: ${animals.map((animal) => animal.subjectName || animal.label).join(' and ')} ${animals[0].posture || 'is visible'} in the scene`;
+    return visibleSubjects.length > 0
+      ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
+      : `${activeCamera.name}: no active subjects; live camera scene is clear`;
+  };
+
+  const liveSceneDetails = buildSceneDescription();
+
   // Handle Recording Toggle (captures the lightweight 30 FPS display stream)
   const handleToggleRecord = () => {
     if (!isRecordingNow) {
@@ -607,51 +808,65 @@ export function App() {
       const canvas = canvasRef.current;
       const thumb = canvas ? canvas.toDataURL('image/jpeg', 0.8) : '';
 
-      const saveClip = (finalUrl: string, finalSize: number) => {
+      const saveClip = (finalUrl: string, finalSize: number, blob?: Blob) => {
+        const sceneDescription = recordingSceneDescription.trim() || buildSceneDescription();
         const newRec: SavedRecording = {
           id: `rec-${Date.now()}`,
-          title: `Lookout DVR Incident ${new Date().toLocaleTimeString()}`,
+          title: sceneDescription,
+          sceneDescription,
           timestamp: Date.now(),
           durationSeconds: Math.max(1, recordingSeconds),
           resolution: '4K',
           blobUrl: finalUrl,
           thumbnail: thumb,
-          sizeBytes: finalSize || Math.floor(recordingSeconds * 4200000 + 1024 * 512),
+          sizeBytes: finalSize,
           cameraName: activeCamera.name,
-          tags: ['DVR Event', 'Telemetry Burn', '30 FPS'],
+          tags: ['DVR Event', 'Telemetry Burn', '30 FPS', 'Scene Description'],
         };
-        StorageService.saveRecording(newRec);
-        setRecordings(StorageService.getRecordings());
-        audioEngine.speakSceneDescription('DVR clip saved to local encrypted vault.');
+        StorageService.saveRecording(newRec, blob);
+        // Keep the live object URL for immediate playback; IndexedDB stores the
+        // durable copy used to restore it after reload.
+        setRecordings((previous) => [newRec, ...previous].slice(0, 50));
+        audioEngine.speakSceneDescription(`DVR clip saved: ${sceneDescription}`);
       };
 
       if (recorder && recorder.state !== 'inactive') {
         recorder.onstop = () => {
-          const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+          const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'video/webm' });
+          if (blob.size === 0) {
+            audioEngine.speakSceneDescription('DVR could not save a video because the recorder returned no data.');
+            return;
+          }
           const videoUrl = URL.createObjectURL(blob);
-          saveClip(videoUrl, blob.size);
+          saveClip(videoUrl, blob.size, blob);
         };
         recorder.stop();
       } else {
-        saveClip(thumb, 0);
+        audioEngine.speakSceneDescription('DVR is unavailable: no video recorder stream was created.');
       }
     }
   };
 
   // Export 4K Forensic Master Snapshot
   const handleTake4KSnapshot = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const displayCanvas = canvasRef.current;
+    const video = videoElementRef.current;
+    if (!displayCanvas) return;
 
-    // Create virtual 4K canvas (3840x2160) for forensic export
+    // Prefer native camera pixels for the still. The display canvas is an HD
+    // presentation surface, not the source image, so exporting it would soften
+    // a high-resolution camera unnecessarily.
+    const source = video && video.readyState >= 2 && video.videoWidth > 0 ? video : displayCanvas;
+    const sourceWidth = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
+    const sourceHeight = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
     const k4Canvas = document.createElement('canvas');
     k4Canvas.width = 3840;
-    k4Canvas.height = 2160;
+    k4Canvas.height = Math.round(3840 * sourceHeight / Math.max(1, sourceWidth));
     const ctx = k4Canvas.getContext('2d');
     if (ctx) {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(canvas, 0, 0, 3840, 2160);
+      ctx.drawImage(source, 0, 0, k4Canvas.width, k4Canvas.height);
 
       const link = document.createElement('a');
       link.download = `LOOKOUT_4K_${Date.now()}.png`;
@@ -694,50 +909,55 @@ export function App() {
         return 'bg-zinc-950 text-red-100 selection:bg-red-600 selection:text-white';
       case 'light':
         return 'bg-slate-100 text-slate-900 selection:bg-cyan-500 selection:text-white';
+      case 'pink':
+        return 'bg-fuchsia-950 text-fuchsia-50 selection:bg-pink-500 selection:text-white';
+      case 'lime':
+        return 'bg-lime-950 text-lime-50 selection:bg-lime-500 selection:text-black';
       default:
         return 'bg-slate-950 text-slate-100 selection:bg-cyan-500 selection:text-black';
     }
   };
 
 
-  const captureLiveVideoFrame = (maxWidth = isPhone ? 1280 : HD_FACE_MAX_WIDTH) => {
+  const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 2560) => {
     const video = videoElementRef.current;
-    const frame = video ? captureNativeHdFrame(video, maxWidth, isPhone ? 0.90 : 0.92) : null;
-    return frame
-      ? { imageBase64: frame.imageBase64, width: frame.width, height: frame.height, canvas: frame.canvas }
-      : null;
+    if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
+    const width = Math.min(maxWidth, video.videoWidth);
+    const height = Math.round((width * video.videoHeight) / video.videoWidth);
+    const frame = document.createElement('canvas');
+    frame.width = width;
+    frame.height = height;
+    const context = frame.getContext('2d');
+    if (!context) return null;
+    context.drawImage(video, 0, 0, width, height);
+    return { imageBase64: frame.toDataURL('image/jpeg', isPhone ? 0.84 : 0.90), width, height, canvas: frame };
   };
-
-  /**
-   * Manual enrollment capture: evaluate several native-HD frames, recognize
-   * the sharpest one, then crop the returned face without downsampling it to
-   * the old 192px thumbnail size.
-   */
-  const captureSharpHdFace = useCallback(async (): Promise<string | null> => {
-    const video = videoElementRef.current;
-    if (!video) return null;
-    const frame = await captureSharpNativeFrame(video, 5, isPhone ? 1280 : HD_FACE_MAX_WIDTH);
-    if (!frame || !(await faceRecognitionService.waitUntilAvailable())) return null;
-    const detections = await faceRecognitionService.recognize(frame.imageBase64);
-    const face = [...detections].sort((a, b) => {
-      const areaA = Math.max(0, a.box.x_max - a.box.x_min) * Math.max(0, a.box.y_max - a.box.y_min);
-      const areaB = Math.max(0, b.box.x_max - b.box.x_min) * Math.max(0, b.box.y_max - b.box.y_min);
-      return areaB - areaA;
-    })[0];
-    if (!face) return null;
-    return createHdFaceReference(frame.canvas, face.box)?.imageBase64 || null;
-  }, [isPhone]);
 
   const showScanFeedback = (message: string) => {
     setLiveAlert(message);
-    window.setTimeout(() => setLiveAlert((current) => current === message ? '' : current), 6000);
+    const canvas = canvasRef.current;
+    if (canvas) setVisualAlertFrame(canvas.toDataURL('image/jpeg', 0.86));
+    window.setTimeout(() => {
+      setLiveAlert((current) => current === message ? '' : current);
+      setVisualAlertFrame((current) => current ? '' : current);
+    }, 6000);
   };
 
   return (
     <div className={`app-shell min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
+      {isBooting && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black text-center text-white transition-opacity duration-500"><div><div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-fuchsia-500 border-t-lime-300" /><p className="font-mono text-sm font-bold tracking-[0.3em] text-fuchsia-300">LOOKOUT AI</p><p className="mt-2 text-xs text-slate-500">Loading local camera intelligence…</p></div></div>}
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
-      {liveAlert && <div role="alert" className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-center gap-2 rounded-xl border border-amber-500/60 bg-amber-950/95 px-4 py-3 text-sm font-semibold text-amber-100 shadow-xl sm:left-auto sm:right-4 sm:top-16 sm:max-w-md"><AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />{liveAlert}</div>}
+      {liveAlert && <div role="alert" className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/75 p-3 backdrop-blur-[2px] sm:p-8">
+        <div className="relative flex h-full max-h-[min(82vh,720px)] w-full max-w-5xl items-end overflow-hidden rounded-2xl border-2 border-amber-400/80 bg-slate-950 shadow-2xl shadow-amber-950/50">
+          {visualAlertFrame ? <img src={visualAlertFrame} alt="Animated camera alert preview" className="absolute inset-0 h-full w-full object-cover opacity-80 alert-video-preview" /> : <div className="absolute inset-0 bg-gradient-to-br from-amber-950 via-slate-950 to-black" />}
+          <div className="absolute inset-0 alert-video-scanline" />
+          <div className="relative m-3 w-full rounded-xl border border-amber-400/60 bg-black/75 p-4 text-amber-50 backdrop-blur-md sm:m-6 sm:p-6">
+            <div className="flex items-center gap-2 text-xs font-mono font-bold uppercase tracking-widest text-amber-300"><AlertTriangle className="h-5 w-5 animate-pulse" /> Video alert • live scene preview</div>
+            <p className="mt-2 text-lg font-bold sm:text-2xl">{liveAlert}</p>
+          </div>
+        </div>
+      </div>}
 
       {/* TOP PERSISTENT NAVIGATION BAR */}
       <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/90 px-3 py-2.5 shadow-lg backdrop-blur-md sm:flex-nowrap sm:px-4">
@@ -771,7 +991,7 @@ export function App() {
           {/* Quick Theme Mode Toggle */}
           <button
             onClick={() => {
-              const cycle: UIThemeMode[] = ['dark', 'oled', 'tactical_nvg', 'light'];
+              const cycle: UIThemeMode[] = ['pink', 'lime', 'oled', 'dark', 'tactical_nvg', 'light'];
               const next = cycle[(cycle.indexOf(currentTheme) + 1) % cycle.length];
               setCurrentTheme(next);
             }}
@@ -891,14 +1111,24 @@ export function App() {
       </div>
 
       {/* MAIN VIEWPORT CONTAINER */}
-      <main className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5">
+      <motion.main
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: 'spring', stiffness: 180, damping: 24, mass: 0.8 }}
+        className="flex w-full max-w-7xl flex-1 flex-col gap-3 mx-auto p-2.5 sm:gap-4 sm:p-5"
+      >
         {/* PRIMARY DVR STAGE & CANVAS */}
-        <div ref={streamStageRef} className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none">
-          {/* Low-CPU 30 FPS Render Canvas */}
+        <motion.div
+          ref={streamStageRef}
+          layout
+          transition={{ type: 'spring', stiffness: 240, damping: 26 }}
+          className="group relative flex aspect-video w-full items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-black shadow-2xl sm:rounded-2xl fullscreen:z-50 fullscreen:h-screen fullscreen:w-screen fullscreen:aspect-auto fullscreen:rounded-none"
+        >
+          {/* HD 30 FPS Render Canvas; source video remains native-resolution for exports */}
           <canvas
             ref={canvasRef}
-            width={960}
-            height={540}
+            width={1920}
+            height={1080}
             className="w-full h-full object-contain block bg-slate-950"
           />
           {!(videoElementRef.current && videoElementRef.current.readyState >= 2 && videoElementRef.current.videoWidth > 0) && (
@@ -949,10 +1179,32 @@ export function App() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
-        </div>
+          <SceneCaptionOverlay details={liveSceneDetails} enabled={sceneOverlayEnabled} />
+        </motion.div>
+
+        <SceneDetailsPanel
+          details={liveSceneDetails}
+          detections={detectedObjects}
+          overlayEnabled={sceneOverlayEnabled}
+          onOverlayChange={setSceneOverlayEnabled}
+        />
+        {deliveryPending && <div className="rounded-xl border border-amber-400/60 bg-amber-950/70 px-4 py-3 shadow-lg" role="status">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-xs font-bold uppercase tracking-wider text-amber-300">Delivery package pending</p><p className="mt-1 text-sm text-amber-50">{deliveryDescription}</p><p className="mt-1 text-[10px] text-amber-200/70">This reminder remains until you confirm the package alert is complete.</p></div><button type="button" onClick={() => { setDeliveryPending(false); localStorage.removeItem('lookout_delivery_pending'); setLiveAlert('Delivery alert acknowledged.'); }} className="rounded-lg bg-amber-400 px-3 py-2 font-mono text-xs font-bold text-black hover:bg-amber-300">ACKNOWLEDGE DELIVERY</button></div>
+        </div>}
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
         <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">
+          <label className="flex min-w-0 flex-col gap-1 font-mono text-[10px] font-bold uppercase tracking-wider text-slate-400">
+            Free scene description <span className="font-normal normal-case tracking-normal text-cyan-400">Unlimited — used as the DVR filename and label</span>
+            <textarea
+              value={recordingSceneDescription}
+              onChange={(event) => setRecordingSceneDescription(event.target.value)}
+              placeholder="Describe this scene before recording, or leave blank for automatic scene labeling…"
+              rows={2}
+              className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 font-sans text-sm font-normal normal-case tracking-normal text-slate-100 outline-none placeholder:text-slate-600 focus:border-cyan-500"
+              aria-label="Free unlimited scene description for the next DVR recording"
+            />
+          </label>
           {/* Recording & Snapshot Actions */}
           <div className="flex w-full items-center gap-2 overflow-x-auto pb-1 no-scrollbar">
             <button
@@ -1014,7 +1266,7 @@ export function App() {
                     dets,
                     frame.width,
                     frame.height,
-                    storagePreferences.faceMatchThreshold || 0.84
+                    storagePreferences.faceMatchThreshold || 0.92
                   );
                   detectedObjectsRef.current = updated;
                   setDetectedObjects([...updated]);
@@ -1136,7 +1388,7 @@ export function App() {
             onClose={() => setActivePanel('none')}
           />
         )}
-      </main>
+      </motion.main>
 
       {/* FOOTER */}
       <footer className="mt-auto flex flex-col items-center justify-between gap-2 border-t border-slate-800 bg-slate-950 px-3 py-4 text-center font-mono text-[11px] text-slate-500 sm:flex-row sm:px-6 sm:text-xs">
@@ -1144,8 +1396,10 @@ export function App() {
           <Shield className="w-4 h-4 text-cyan-400" />
           <span>Lookout AI • Next-Gen PWA Surveillance Hub</span>
         </div>
-        <div>
-          Recognition-First Low-CPU Mode • Local Biometric Data • 30 FPS Display
+        <div className="max-w-2xl text-center">
+          Recognition-First Low-CPU Mode • Local Biometric Data • 30 FPS Display<br />
+          Created by Brian Cross using Trill AI for references, CompreFace for inference and recognition, and NodeJS testing.
+          <span className="mt-1 block text-[10px] text-slate-600">Privacy notice: obtain informed permission before adding any person to a recognition database. Unauthorized biometric identification may violate privacy laws and can result in legal action. Use this app lawfully; you are responsible for alerts, recordings, data security, and any harm or liability arising from its use.</span>
         </div>
       </footer>
 
@@ -1159,7 +1413,6 @@ export function App() {
       <FaceAlbumModal
         isOpen={showFaceAlbum}
         onClose={() => setShowFaceAlbum(false)}
-        onCaptureHdFace={captureSharpHdFace}
         onProfileUpdated={() => setFaceProfiles(StorageService.getFaceProfiles())}
       />
       <AddCameraModal

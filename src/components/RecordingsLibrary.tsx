@@ -41,7 +41,11 @@ export const RecordingsLibrary: React.FC<RecordingsLibraryProps> = ({
   const handleDownload = (rec: SavedRecording) => {
     const a = document.createElement('a');
     a.href = rec.blobUrl;
-    a.download = `${rec.title.replace(/\s+/g, '_')}_${rec.resolution}.webm`;
+    const safeName = (rec.sceneDescription || rec.title || 'lookout-dvr-scene')
+      .replace(/[^a-z0-9]+/gi, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 180) || 'lookout-dvr-scene';
+    a.download = `${safeName}_${rec.resolution}.webm`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -118,7 +122,8 @@ export const RecordingsLibrary: React.FC<RecordingsLibraryProps> = ({
                     </button>
                   </div>
 
-                  <h4 className="font-bold text-xs text-white truncate">{rec.title}</h4>
+                  <h4 className="font-bold text-xs text-white break-words">{rec.title}</h4>
+                  {rec.sceneDescription && <p className="mt-1 line-clamp-3 text-[10px] leading-relaxed text-slate-400">{rec.sceneDescription}</p>}
                   <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 mt-1">
                     <span>{rec.cameraName}</span>
                     <span>{new Date(rec.timestamp).toLocaleDateString()}</span>

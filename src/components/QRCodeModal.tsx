@@ -99,7 +99,7 @@ export const QRCodeModal: React.FC<QRCodeModalProps> = ({ isOpen, onClose, urlTo
           </div>
           <div>
             <h2 className="text-lg font-bold tracking-tight text-white">Share Lookout AI</h2>
-            <p className="text-xs text-slate-400 font-mono">Scan QR Code with mobile camera to sync & open</p>
+            <p className="text-xs text-slate-400 font-mono">Scan QR Code to open this Lookout portal on another device</p>
           </div>
         </div>
 
@@ -145,7 +145,7 @@ export const QRCodeModal: React.FC<QRCodeModalProps> = ({ isOpen, onClose, urlTo
         <div className="mt-5 p-3 rounded-lg bg-slate-800/50 border border-slate-700/60 text-xs text-slate-300 flex items-start gap-2.5">
           <Wifi className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
           <span>
-            Works across local Wi-Fi and mobile networks. All biometric and facial profiles sync securely in real-time.
+            The QR opens the same portal URL. Live multi-device biometric syncing requires a configured secure backend; this local build keeps biometric data on each device by default.
           </span>
         </div>
       </div>

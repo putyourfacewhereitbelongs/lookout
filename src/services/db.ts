@@ -20,6 +20,8 @@ const THEME_KEY = 'lookout_theme_v1';
 
 const FACES_KEY = 'lookout_faces_v1';
 const RECORDINGS_KEY = 'lookout_recordings_v1';
+const RECORDING_BLOB_DB = 'lookout_recording_media_v1';
+const RECORDING_BLOB_STORE = 'recording-blobs';
 const CONTACTS_KEY = 'lookout_emergency_contacts_v1';
 const SETTINGS_KEY = 'lookout_system_settings_v1';
 const CAMERAS_KEY = 'lookout_cameras_v1';
@@ -120,9 +122,7 @@ export const DEFAULT_STORAGE_PREFERENCES: StoragePreferences = {
   recordingRetentionDays: 14,
   autoPurgeOldRecordings: true,
   facialRecognitionMasterEnabled: true,
-  // One clear enrollment photo generally scores below the old 92% setting.
-  // Keep a safer balanced default that still requires an unambiguous lead.
-  faceMatchThreshold: 0.84,
+  faceMatchThreshold: 0.92,
 };
 
 // Seed recognized profiles including CompreFace biometric database subjects
@@ -388,6 +388,16 @@ export class StorageService {
     this.saveFaceProfiles(profiles);
   }
 
+  static deleteFaceSnapshot(profileId: string, snapshotIndex: number): void {
+    const profiles = this.getFaceProfiles().map((profile) => {
+      if (profile.id !== profileId) return profile;
+      const snapshots = (profile.snapshots || []).filter((_, index) => index !== snapshotIndex);
+      const thumbnail = snapshots[0] || '';
+      return { ...profile, snapshots, thumbnail };
+    });
+    this.saveFaceProfiles(profiles);
+  }
+
   // Emergency Contacts
   static getEmergencyContacts(): EmergencyContact[] {
     try {
@@ -419,19 +429,72 @@ export class StorageService {
     return [];
   }
 
-  static saveRecording(recording: SavedRecording): void {
+  private static openRecordingBlobDb(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('IndexedDB is not available in this browser'));
+        return;
+      }
+      const request = indexedDB.open(RECORDING_BLOB_DB, 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore(RECORDING_BLOB_STORE);
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error('Could not open recording storage'));
+    });
+  }
+
+  static saveRecording(recording: SavedRecording, blob?: Blob): void {
     const list = this.getRecordings();
-    list.unshift(recording);
+    // The metadata stays small and portable in localStorage; the actual video
+    // bytes live in IndexedDB so a multi-minute clip is not silently dropped by
+    // the browser's localStorage quota.
+    const metadata = { ...recording, blobUrl: blob ? '' : recording.blobUrl, blobKey: blob ? recording.id : undefined };
+    list.unshift(metadata);
     try {
-      localStorage.setItem(RECORDINGS_KEY, JSON.stringify(list.slice(0, 50))); // Keep latest 50
+      localStorage.setItem(RECORDINGS_KEY, JSON.stringify(list.slice(0, 50)));
+      if (blob) {
+        this.openRecordingBlobDb().then((db) => {
+          const tx = db.transaction(RECORDING_BLOB_STORE, 'readwrite');
+          tx.objectStore(RECORDING_BLOB_STORE).put(blob, recording.id);
+          tx.oncomplete = () => db.close();
+          tx.onerror = () => console.error('Failed to persist recording video', tx.error);
+        }).catch((error) => console.error('Failed to open recording video storage', error));
+      }
     } catch (e) {
-      console.error('Failed to save recording', e);
+      console.error('Failed to save recording metadata', e);
     }
+  }
+
+  static async hydrateRecordings(recordings: SavedRecording[]): Promise<SavedRecording[]> {
+    const hydrated = await Promise.all(recordings.map(async (recording) => {
+      const blobKey = recording.blobKey;
+      if (!blobKey || recording.blobUrl) return recording;
+      try {
+        const db = await this.openRecordingBlobDb();
+        const blob = await new Promise<Blob | undefined>((resolve, reject) => {
+          const request = db.transaction(RECORDING_BLOB_STORE, 'readonly').objectStore(RECORDING_BLOB_STORE).get(blobKey);
+          request.onsuccess = () => resolve(request.result as Blob | undefined);
+          request.onerror = () => reject(request.error);
+        });
+        db.close();
+        return blob ? { ...recording, blobUrl: URL.createObjectURL(blob) } : recording;
+      } catch (error) {
+        console.error('Failed to load saved recording video', error);
+        return recording;
+      }
+    }));
+    return hydrated;
   }
 
   static deleteRecording(id: string): void {
     const list = this.getRecordings().filter((r) => r.id !== id);
     localStorage.setItem(RECORDINGS_KEY, JSON.stringify(list));
+    this.openRecordingBlobDb().then((db) => {
+      const tx = db.transaction(RECORDING_BLOB_STORE, 'readwrite');
+      tx.objectStore(RECORDING_BLOB_STORE).delete(id);
+      tx.oncomplete = () => db.close();
+    }).catch(() => {});
   }
 
   // Settings sync
@@ -733,12 +796,7 @@ export class StorageService {
   static getStoragePreferences(): StoragePreferences {
     const saved = this.getSavedSettings();
     if (saved && saved.storagePreferences) {
-      const merged = { ...DEFAULT_STORAGE_PREFERENCES, ...saved.storagePreferences };
-      // Migrate the original balanced value. It was too strict for a single
-      // sharp enrollment photo and caused otherwise good HD matches to flash
-      // as UNKNOWN between frames.
-      if (merged.faceMatchThreshold === 0.92) merged.faceMatchThreshold = 0.84;
-      return merged;
+      return { ...DEFAULT_STORAGE_PREFERENCES, ...saved.storagePreferences };
     }
     return DEFAULT_STORAGE_PREFERENCES;
   }

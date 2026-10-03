@@ -103,6 +103,15 @@ export interface CompreFacePose {
   yaw: number;
 }
 
+export type BodyPosture = 'sitting' | 'standing' | 'walking' | 'unknown';
+
+export interface BodyLandmark {
+  name: 'head' | 'neck' | 'left_shoulder' | 'right_shoulder' | 'left_elbow' | 'right_elbow' | 'left_wrist' | 'right_wrist' | 'left_hip' | 'right_hip' | 'left_knee' | 'right_knee' | 'left_ankle' | 'right_ankle';
+  x: number;
+  y: number;
+  confidence: number;
+}
+
 export interface CompreFaceBox {
   probability: number;
   x_min: number;
@@ -118,6 +127,7 @@ export interface CompreFaceDetection {
   gender?: CompreFaceGender;
   pose?: CompreFacePose;
   landmarks?: [number, number][];
+  emotion?: string;
 }
 
 export interface DetectionObject {
@@ -139,10 +149,10 @@ export interface DetectionObject {
   gender?: CompreFaceGender;
   pose?: CompreFacePose;
   landmarks?: [number, number][]; // normalized [x, y] coordinates
+  bodyLandmarks?: BodyLandmark[];
+  posture?: BodyPosture;
   similarity?: number;
   subjectName?: string;
-  /** Last frame with actual identity evidence (separate from visual tracking). */
-  lastKnownTime?: number;
   targetBbox?: [number, number, number, number];
   silhouetteBbox?: [number, number, number, number];
   targetSilhouetteBbox?: [number, number, number, number];
@@ -154,7 +164,7 @@ export interface FaceProfile {
   id: string;
   name: string;
   subjectType: 'person' | 'animal';
-  role: 'family' | 'friend' | 'pet' | 'wildlife' | 'intruder' | 'unknown';
+  role: '' | 'family' | 'friend' | 'guest' | 'need_permissions' | 'pet' | 'wildlife' | 'intruder' | 'unknown';
   thumbnail: string; // Data URL
   snapshots: string[];
   clusterId: string;
@@ -276,7 +286,7 @@ export interface StoragePreferences {
   faceMatchThreshold: number;
 }
 
-export type UIThemeMode = 'dark' | 'light' | 'oled' | 'tactical_nvg';
+export type UIThemeMode = 'dark' | 'light' | 'oled' | 'tactical_nvg' | 'pink' | 'lime';
 
 export interface VideoProcessingSettings {
   videoBackgroundErase: boolean;
@@ -313,10 +323,14 @@ export interface AudioVisualCue {
 export interface SavedRecording {
   id: string;
   title: string;
+  /** Unlimited user-authored or generated context for the captured scene. */
+  sceneDescription?: string;
   timestamp: number;
   durationSeconds: number;
   resolution: '1080p' | '4K' | '8K Super-Res';
   blobUrl: string;
+  /** IndexedDB key for the durable video bytes. */
+  blobKey?: string;
   thumbnail: string;
   sizeBytes?: number;
   cameraName: string;

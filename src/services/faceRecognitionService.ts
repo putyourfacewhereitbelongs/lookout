@@ -1,9 +1,8 @@
-import { CompreFaceDetection, DetectionObject } from '../types';
-import { createEnrollmentVariants } from './hdFaceCapture';
+import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
 
-const PERSON_TRACK_RETENTION_MS = 2200;
-const IDENTITY_HOLD_MS = 5000;
-const MIN_IDENTITY_SIMILARITY = 0.80;
+// A face should disappear quickly after the detector loses it. Keeping a
+// person alive for multiple seconds is a common source of "ghost" sightings.
+const PERSON_TRACK_RETENTION_MS = 650;
 const LONG_RANGE_TILE_COLUMNS = 3;
 const LONG_RANGE_TILE_ROWS = 2;
 const LONG_RANGE_TILE_WIDTH_RATIO = 0.46;
@@ -31,6 +30,67 @@ function topSimilarity(detection: CompreFaceDetection): number {
 
 function boxArea(detection: CompreFaceDetection): number {
   return Math.max(0, detection.box.x_max - detection.box.x_min) * Math.max(0, detection.box.y_max - detection.box.y_min);
+}
+
+function inferredEmotion(detection: CompreFaceDetection): 'neutral' | 'alert' | 'friendly' | 'distressed' | 'aggressive' {
+  if (detection.emotion && ['neutral', 'alert', 'friendly', 'distressed', 'aggressive'].includes(detection.emotion)) {
+    return detection.emotion as 'neutral' | 'alert' | 'friendly' | 'distressed' | 'aggressive';
+  }
+  // CompreFace does not expose emotion in every deployment. Use pose as a
+  // conservative visual cue and clearly keep the result as an estimate.
+  const yaw = Math.abs(detection.pose?.yaw || 0);
+  const pitch = Math.abs(detection.pose?.pitch || 0);
+  return yaw > 24 || pitch > 18 ? 'alert' : 'neutral';
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/** Build a stable body skeleton from the detected head/silhouette geometry. If
+ * a future pose provider returns real body points, those can replace this
+ * geometry without changing the HUD or tracking model. */
+function estimateBodyLandmarks(
+  targetBbox: [number, number, number, number],
+  silhouetteBbox: [number, number, number, number],
+  previousTarget?: [number, number, number, number],
+): { landmarks: BodyLandmark[]; posture: BodyPosture } {
+  const [x, y, w, h] = targetBbox;
+  const [sx, sy, sw, sh] = silhouetteBbox;
+  const cx = x + w / 2;
+  const shoulderY = clamp01(y + h * 1.35);
+  const hipY = clamp01(sy + sh * 0.48);
+  const kneeY = clamp01(sy + sh * 0.72);
+  const ankleY = clamp01(sy + sh * 0.96);
+  const shoulderOffset = Math.max(w * 0.85, sw * 0.18);
+  const hipOffset = Math.max(w * 0.55, sw * 0.13);
+  const elbowDrop = Math.max(h * 1.1, (hipY - shoulderY) * 0.45);
+  const leftShoulder = [clamp01(cx - shoulderOffset), shoulderY];
+  const rightShoulder = [clamp01(cx + shoulderOffset), shoulderY];
+  const leftHip = [clamp01(cx - hipOffset), hipY];
+  const rightHip = [clamp01(cx + hipOffset), hipY];
+  const leftKnee = [clamp01(cx - hipOffset * 0.95), kneeY];
+  const rightKnee = [clamp01(cx + hipOffset * 0.95), kneeY];
+  const motion = previousTarget
+    ? Math.hypot((x + w / 2) - (previousTarget[0] + previousTarget[2] / 2), (y + h / 2) - (previousTarget[1] + previousTarget[3] / 2))
+    : 0;
+  const aspect = sh / Math.max(0.01, sw);
+  const posture: BodyPosture = motion > 0.018 ? 'walking' : aspect < 1.65 ? 'sitting' : 'standing';
+  const point = (name: BodyLandmark['name'], pair: number[], confidence = 0.62): BodyLandmark => ({ name, x: pair[0], y: pair[1], confidence });
+  return {
+    posture,
+    landmarks: [
+      point('head', [cx, y + h * 0.25], 0.95), point('neck', [cx, y + h * 1.08], 0.78),
+      point('left_shoulder', leftShoulder), point('right_shoulder', rightShoulder),
+      point('left_elbow', [clamp01(leftShoulder[0] - w * 0.55), clamp01(shoulderY + elbowDrop)]),
+      point('right_elbow', [clamp01(rightShoulder[0] + w * 0.55), clamp01(shoulderY + elbowDrop)]),
+      point('left_wrist', [clamp01(leftShoulder[0] - w * 0.7), clamp01(shoulderY + elbowDrop * 1.6)]),
+      point('right_wrist', [clamp01(rightShoulder[0] + w * 0.7), clamp01(shoulderY + elbowDrop * 1.6)]),
+      point('left_hip', leftHip), point('right_hip', rightHip),
+      point('left_knee', leftKnee), point('right_knee', rightKnee),
+      point('left_ankle', [clamp01(leftKnee[0]), ankleY]), point('right_ankle', [clamp01(rightKnee[0]), ankleY]),
+    ],
+  };
 }
 
 function boxIntersectionOverUnion(a: CompreFaceDetection, b: CompreFaceDetection): number {
@@ -126,15 +186,6 @@ export class FaceRecognitionService {
 
   getLastRecognitionError(): string {
     return this.lastRecognitionError;
-  }
-
-  /** Lets an on-demand HD enrollment wait for the single active request. */
-  async waitUntilAvailable(timeoutMs = 2000): Promise<boolean> {
-    const startedAt = Date.now();
-    while (this.isProcessing && Date.now() - startedAt < timeoutMs) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    return !this.isProcessing;
   }
 
   static getInstance(): FaceRecognitionService {
@@ -279,13 +330,20 @@ export class FaceRecognitionService {
 
   isReliableMatch(detection: CompreFaceDetection, threshold: number): boolean {
     const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    // CompreFace similarity is not a percentage. A single clear enrollment
-    // photo commonly scores in the low-to-mid 80s, especially from a webcam
-    // angle. Keep an 80% safety floor, then require a useful lead over the
-    // runner-up identity so improving recall does not make every face a match.
-    const requiredSimilarity = Math.max(MIN_IDENTITY_SIMILARITY, Math.min(0.98, threshold));
+    // Honor the "Sensitive" setting while keeping a meaningful floor and a
+    // clear lead over the next enrolled identity. This is especially important
+    // for small distant faces whose embedding score is naturally lower.
+    const requiredSimilarity = Math.max(0.85, Math.min(0.99, threshold));
     return Boolean(best && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
+  }
+
+  /** Stricter gate used before a name can trigger an alert or DVR event. */
+  isConservativeMatch(detection: CompreFaceDetection, threshold: number): boolean {
+    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
+    const requiredSimilarity = Math.max(0.96, Math.min(0.995, threshold));
+    return Boolean(best && detection.box.probability >= 0.70 && best.similarity >= requiredSimilarity &&
+      (!runnerUp || best.similarity - runnerUp.similarity >= 0.10));
   }
 
   /**
@@ -314,32 +372,12 @@ export class FaceRecognitionService {
    */
   async enrollFace(subject: string, imageBase64: string): Promise<any> {
     try {
-      // A single sharp capture is enough for the user. These conservative
-      // variants give CompreFace mirrored and slightly tighter references so
-      // the same person is recognized when lighting or head angle changes.
-      const variants = await createEnrollmentVariants(imageBase64);
-      let firstResult: any = null;
-      let enrolledCount = 0;
-
-      for (const variant of variants) {
-        const res = await fetch('/api/recognition/faces', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subject, imageBase64: variant }),
-        });
-        const result = await res.json().catch(() => ({ success: false }));
-        if (!firstResult) firstResult = result;
-        if (result?.success) enrolledCount += 1;
-        // A failed primary image means the enrollment itself failed. A failed
-        // optional variant does not erase a successful sharp reference.
-        if (!result?.success && enrolledCount === 0) return result;
-      }
-
-      return {
-        ...(firstResult || { success: false }),
-        success: enrolledCount > 0,
-        enrolledCount,
-      };
+      const res = await fetch('/api/recognition/faces', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject, imageBase64 }),
+      });
+      return await res.json();
     } catch (err) {
       console.warn('Enroll face error:', err);
       return { success: false };
@@ -428,25 +466,26 @@ export class FaceRecognitionService {
       // Check subject match
       const rankedSubjects = [...(d.subjects || [])].sort((a, b) => b.similarity - a.similarity);
       const topSubject = rankedSubjects[0] || null;
-      let isRecognized = this.isReliableMatch(d, matchThreshold);
-      let isRecognizedAnimal = Boolean(
+      const isRecognized = this.isReliableMatch(d, matchThreshold);
+      const isRecognizedAnimal = Boolean(
         isRecognized && topSubject && animalNames.some((name) => name.toLowerCase() === topSubject.subject.toLowerCase())
       );
-      let category: 'animal' | 'person' = isRecognizedAnimal ? 'animal' : 'person';
+      const category = isRecognizedAnimal ? 'animal' : 'person';
 
       let subjectName = '';
       let label = '';
       let nameTag = '';
 
+      const ageLabel = d.age ? `AGE ~${Math.round((d.age.low + d.age.high) / 2)}` : 'AGE N/A';
+      const emotionLabel = `EMOTION ${inferredEmotion(d).toUpperCase()}`;
       if (isRecognized && topSubject) {
         subjectName = topSubject.subject;
         const pct = Math.round(topSubject.similarity * 100);
-        label = `${topSubject.subject.toUpperCase()} (${pct}%)`;
+        label = `${topSubject.subject.toUpperCase()} • ${ageLabel} • ${emotionLabel} (${pct}%)`;
         nameTag = topSubject.subject;
       } else {
         const genderStr = d.gender?.value ? d.gender.value.toUpperCase() : 'PERSON';
-        const ageEst = d.age ? `~${Math.round((d.age.low + d.age.high) / 2)}y` : '';
-        label = `UNKNOWN ${genderStr} ${ageEst}`.trim();
+        label = `UNKNOWN ${genderStr} • ${ageLabel} • ${emotionLabel}`;
         nameTag = label;
       }
 
@@ -481,42 +520,12 @@ export class FaceRecognitionService {
         }
       }
 
-      // Do not alternate between a known name and UNKNOWN when one frame is
-      // slightly soft or the recognizer returns a low-confidence subject list.
-      // A nearby track may continue its last confirmed identity for a few
-      // seconds, but only the same subject can refresh that continuation.
-      const continuationFloor = Math.max(MIN_IDENTITY_SIMILARITY, Math.min(0.90, matchThreshold - 0.08));
-      const sameTopIdentity = Boolean(
-        bestMatch?.isKnown && topSubject && bestMatch.subjectName &&
-        bestMatch.subjectName.toLowerCase() === topSubject.subject.toLowerCase()
-      );
-      const lowConfidenceContinuation = Boolean(
-        !isRecognized && sameTopIdentity && topSubject && topSubject.similarity >= continuationFloor
-      );
-      const heldIdentity = Boolean(
-        !isRecognized && !topSubject && bestMatch?.isKnown &&
-        typeof bestMatch.lastKnownTime === 'number' && now - bestMatch.lastKnownTime < IDENTITY_HOLD_MS
-      );
-      if (lowConfidenceContinuation || heldIdentity) {
-        isRecognized = true;
-        subjectName = topSubject?.subject || bestMatch?.subjectName || '';
-        isRecognizedAnimal = Boolean(
-          subjectName && animalNames.some((name) => name.toLowerCase() === subjectName.toLowerCase())
-        );
-        category = isRecognizedAnimal ? 'animal' : 'person';
-        const similarity = topSubject?.similarity ?? bestMatch?.similarity ?? bestMatch?.confidence ?? 0;
-        label = `${subjectName.toUpperCase()} (${Math.round(similarity * 100)}%)`;
-        nameTag = subjectName;
-      }
-
       if (bestMatch) {
         // Update existing tracked person
         matchedPersonIds.add(bestMatch.id);
         const previousTarget = bestMatch.targetBbox || bestMatch.bbox;
-        const sameKnownIdentity = Boolean(
-          isRecognized && bestMatch.isKnown && bestMatch.subjectName && subjectName &&
-          bestMatch.subjectName.toLowerCase() === subjectName.toLowerCase()
-        );
+        const bodyPose = estimateBodyLandmarks(targetBbox, targetSilhouetteBbox, previousTarget);
+        const sameKnownIdentity = isRecognized && bestMatch.isKnown && bestMatch.subjectName === subjectName;
         const measurementWeight = sameKnownIdentity ? 0.68 : 0.55;
         bestMatch.targetBbox = targetBbox.map((value, index) =>
           previousTarget[index] * (1 - measurementWeight) + value * measurementWeight
@@ -530,18 +539,23 @@ export class FaceRecognitionService {
         bestMatch.nameTag = nameTag;
         bestMatch.category = category;
         bestMatch.isKnown = isRecognized;
-        bestMatch.subjectName = subjectName || bestMatch.subjectName;
+        // Never carry a previously recognized name into a new low-confidence
+        // observation. That stale identity is how false "still here" alerts happen.
+        bestMatch.subjectName = isRecognized ? subjectName : '';
         bestMatch.confidence = topSubject ? topSubject.similarity : d.box.probability;
         bestMatch.age = d.age;
         bestMatch.gender = d.gender;
+        bestMatch.emotion = inferredEmotion(d);
+        bestMatch.bodyLandmarks = bodyPose.landmarks;
+        bestMatch.posture = bodyPose.posture;
         bestMatch.pose = d.pose;
         bestMatch.landmarks = normLandmarks;
         bestMatch.lastSeenTime = now;
-        if (topSubject && (isRecognized || lowConfidenceContinuation)) bestMatch.lastKnownTime = now;
       } else {
         // Spawn newly identified tracked person
         const newId = `${category}-cf-${now}-${detIdx}`;
         matchedPersonIds.add(newId);
+        const bodyPose = estimateBodyLandmarks(targetBbox, targetSilhouetteBbox);
         existingPersons.push({
           id: newId,
           label,
@@ -560,11 +574,13 @@ export class FaceRecognitionService {
           subjectName,
           age: d.age,
           gender: d.gender,
+          emotion: inferredEmotion(d),
+          bodyLandmarks: bodyPose.landmarks,
+          posture: bodyPose.posture,
           pose: d.pose,
           landmarks: normLandmarks,
           similarity: topSubject?.similarity,
           lastSeenTime: now,
-          lastKnownTime: isRecognized && topSubject ? now : undefined,
           silhouetteColor: isRecognized ? '#3b82f6' : '#ef4444',
         });
       }

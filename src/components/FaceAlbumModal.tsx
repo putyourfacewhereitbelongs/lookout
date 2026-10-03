@@ -23,24 +23,21 @@ import { RefreshCw } from 'lucide-react';
 interface FaceAlbumModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Captures a sharp native-HD frame from the active camera and returns its face crop. */
-  onCaptureHdFace?: () => Promise<string | null>;
   onProfileUpdated?: () => void;
 }
 
-export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose, onCaptureHdFace, onProfileUpdated }) => {
+export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose, onProfileUpdated }) => {
   const [activeTab, setActiveTab] = useState<'unknown' | 'known'>('unknown');
   const [profiles, setProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
   const [editingProfile, setEditingProfile] = useState<FaceProfile | null>(null);
   const [editName, setEditName] = useState('');
-  const [editRole, setEditRole] = useState<FaceProfile['role']>('friend');
+  const [editRole, setEditRole] = useState<FaceProfile['role']>('');
   const [editType, setEditType] = useState<'person' | 'animal'>('person');
   const [editNotes, setEditNotes] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [comprefaceSubjects, setComprefaceSubjects] = useState<string[]>([]);
   const [registrationTarget, setRegistrationTarget] = useState('__new__');
   const [isRegisteringFace, setIsRegisteringFace] = useState(false);
-  const [isCapturingHdFace, setIsCapturingHdFace] = useState(false);
   const [registrationMessage, setRegistrationMessage] = useState('');
 
   useEffect(() => {
@@ -90,7 +87,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
   const handleStartNaming = (profile: FaceProfile) => {
     setEditingProfile(profile);
     setEditName(profile.name.startsWith('Unknown') ? '' : profile.name);
-    setEditRole(profile.role === 'unknown' ? (profile.subjectType === 'animal' ? 'pet' : 'family') : profile.role);
+    setEditRole(profile.role === 'unknown' ? '' : profile.role);
     setEditType(profile.subjectType);
     setEditNotes(profile.notes || '');
     setRegistrationTarget('__new__');
@@ -101,32 +98,6 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
         .catch(() => setComprefaceSubjects([]));
     } else {
       setComprefaceSubjects([]);
-    }
-  };
-
-  const handleCaptureHdFace = async () => {
-    if (!editingProfile || editType !== 'person' || !onCaptureHdFace) return;
-    setIsCapturingHdFace(true);
-    setRegistrationMessage('Capturing five native-HD frames and selecting the sharpest face…');
-    try {
-      const image = await onCaptureHdFace();
-      if (!image) {
-        setRegistrationMessage('No clear face was found. Move closer, face the camera, and hold still, then retry.');
-        return;
-      }
-      const updated = StorageService.getFaceProfiles().map((profile) => profile.id === editingProfile.id
-        ? { ...profile, thumbnail: image, snapshots: [...new Set([...(profile.snapshots || []), image])].slice(-12), lastSnapshotAt: Date.now() }
-        : profile);
-      StorageService.saveFaceProfiles(updated);
-      const refreshed = updated.find((profile) => profile.id === editingProfile.id) || editingProfile;
-      setProfiles(updated);
-      setEditingProfile(refreshed);
-      setRegistrationMessage('Sharp HD face captured. Select SAVE & REGISTER FACE to enroll it.');
-      if (onProfileUpdated) onProfileUpdated();
-    } catch {
-      setRegistrationMessage('HD capture failed. Confirm camera access and try again.');
-    } finally {
-      setIsCapturingHdFace(false);
     }
   };
 
@@ -183,6 +154,14 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
     }
   };
 
+  const handleDeleteSnapshot = (profileId: string, index: number) => {
+    StorageService.deleteFaceSnapshot(profileId, index);
+    const updated = StorageService.getFaceProfiles();
+    setProfiles(updated);
+    setEditingProfile(updated.find((profile) => profile.id === profileId) || null);
+    if (onProfileUpdated) onProfileUpdated();
+  };
+
   return (
     <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
       <div className="mobile-dialog flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 text-slate-100 shadow-2xl">
@@ -196,11 +175,11 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
               <div className="flex items-center gap-2">
                 <h2 className="truncate text-sm font-bold text-white sm:text-lg">Biometric Face & Animal Intelligence</h2>
                 <span className="hidden rounded border border-cyan-800 bg-cyan-950 px-2 py-0.5 font-mono text-[10px] text-cyan-400 sm:inline">
-                  OFFLINE NEURAL CLUSTERING
+                  FACE + LOCAL PET RECOGNITION
                 </span>
               </div>
               <p className="hidden text-xs font-mono text-slate-400 sm:block">
-                Stores face profiles and animal reference photos separately; CompreFace enrollment is for people.
+                CompreFace identifies people; the local Pet Recognition module compares enrolled animal reference photos privately in your browser.
               </p>
             </div>
           </div>
@@ -421,18 +400,19 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                 </div>
               </div>
 
-              {editType === 'person' && onCaptureHdFace && (
-                <button
-                  type="button"
-                  onClick={handleCaptureHdFace}
-                  disabled={isCapturingHdFace || isRegisteringFace}
-                  className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-cyan-700 bg-cyan-950/50 px-3 py-2 font-mono text-xs font-bold text-cyan-200 transition hover:bg-cyan-900/70 disabled:cursor-wait disabled:opacity-50"
-                  title="Capture five native-resolution camera frames and keep the sharpest face"
-                >
-                  <Camera className={`h-4 w-4 ${isCapturingHdFace ? 'animate-pulse' : ''}`} />
-                  {isCapturingHdFace ? 'CAPTURING SHARP HD FACE…' : 'RETAKE SHARP HD FACE'}
-                </button>
-              )}
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3">
+                <div className="mb-2 flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-slate-400">
+                  <span>Saved snapshots • each photo is independent</span><span>{editingProfile.snapshots.length}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {editingProfile.snapshots.map((snapshot, index) => (
+                    <div key={`${editingProfile.id}-snapshot-${index}`} className="group relative aspect-square overflow-hidden rounded-lg border border-slate-700 bg-slate-900">
+                      <img src={snapshot} alt={`${editingProfile.name} snapshot ${index + 1}`} className="h-full w-full object-cover" />
+                      <button type="button" onClick={() => handleDeleteSnapshot(editingProfile.id, index)} className="absolute right-1 top-1 rounded bg-black/80 p-1 text-red-300 opacity-0 transition group-hover:opacity-100" aria-label={`Delete snapshot ${index + 1}`} title="Delete this snapshot"><Trash2 className="h-3 w-3" /></button>
+                    </div>
+                  ))}
+                </div>
+              </div>
 
               <div className="mt-4 space-y-3 font-mono text-xs">
                 <div>
@@ -485,8 +465,11 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                       onChange={(e) => setEditRole(e.target.value as any)}
                       className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
                     >
+                      <option value="">Unassigned / choose later</option>
                       <option value="family">Family</option>
                       <option value="friend">Friend</option>
+                      <option value="guest">Guest</option>
+                      <option value="need_permissions">Need Permissions</option>
                       <option value="pet">Pet</option>
                       <option value="wildlife">Wildlife</option>
                       <option value="intruder">Intruder / Threat</option>

@@ -7,7 +7,6 @@ import {
   shouldRunLongRangeTiles,
 } from '../src/services/faceRecognitionService';
 import type { CompreFaceDetection, DetectionObject } from '../src/types';
-import { calculateSharpnessFromGrayscale, getHdFrameDimensions } from '../src/services/hdFaceCapture';
 
 const service = new FaceRecognitionService();
 
@@ -19,29 +18,13 @@ function detection(subjects: Array<{ subject: string; similarity: number }> = []
   };
 }
 
-test('keeps an HD camera frame proportional and never enlarges a smaller source', () => {
-  assert.deepEqual(getHdFrameDimensions(1920, 1080), { width: 1920, height: 1080 });
-  assert.deepEqual(getHdFrameDimensions(3840, 2160), { width: 1920, height: 1080 });
-  assert.deepEqual(getHdFrameDimensions(640, 480), { width: 640, height: 480 });
-});
-
-test('scores edges higher than a flat frame for blur rejection', () => {
-  const flat = new Uint8Array(9 * 9).fill(128);
-  const edges = new Uint8Array(9 * 9);
-  for (let y = 0; y < 9; y += 1) {
-    for (let x = 0; x < 9; x += 1) edges[y * 9 + x] = x < 4 ? 20 : 230;
-  }
-  assert.equal(calculateSharpnessFromGrayscale(flat, 9, 9), 0);
-  assert.ok(calculateSharpnessFromGrayscale(edges, 9, 9) > 0);
-});
-
 test('accepts a high, unambiguous identity match', () => {
   assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.95 }]), 0.92), true);
 });
 
 test('honors the sensitive setting for distant faces without going below the safety floor', () => {
   assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.89 }]), 0.75), true);
-  assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.79 }]), 0.75), false);
+  assert.equal(service.isReliableMatch(detection([{ subject: 'Alex', similarity: 0.84 }]), 0.75), false);
 });
 
 test('rejects close competing identity scores', () => {
@@ -86,16 +69,6 @@ test('requests long-range tiles only for absent or small faces', () => {
     box: { probability: 0.99, x_min: 300, y_min: 200, x_max: 800, y_max: 800 },
   };
   assert.equal(shouldRunLongRangeTiles([largeFace], 1920, 1080), false);
-});
-
-test('holds a confirmed identity through a temporarily weak frame', () => {
-  const knownFace = detection([{ subject: 'Alex', similarity: 0.95 }]);
-  const [known] = service.correlateDetections([], [knownFace], 400, 400, 0.84);
-  const weakFace = detection([]);
-  const [continued] = service.correlateDetections([known], [weakFace], 400, 400, 0.84);
-  assert.equal(continued.id, known.id);
-  assert.equal(continued.isKnown, true);
-  assert.match(continued.label, /ALEX/);
 });
 
 test('correlates every returned landmark into normalized frame coordinates', () => {

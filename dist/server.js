@@ -11,7 +11,7 @@ var __dirname = path.dirname(__filename);
 var app = express();
 var requestedPort = Number.parseInt(process.env.PORT || "3000", 10);
 var PORT = Number.isInteger(requestedPort) && requestedPort > 0 ? requestedPort : 3e3;
-app.use(express.json({ limit: "20mb" }));
+app.use(express.json({ limit: "10mb" }));
 function getLocalNetworkIp() {
   try {
     const interfaces = os.networkInterfaces();

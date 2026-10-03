@@ -89,7 +89,7 @@ The CompreFace images are pinned to upstream version `1.2.0` and follow its [off
 
 ## Low-CPU recognition mode
 
-Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline requests HD camera input (1280x720 on phones and up to 1920x1080 on desktop), sends one native-detail JPEG to CompreFace at a time, and renders overlays at 30 fps. This preserves face pixels for recognition while avoiding overlapping requests. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames. Face enrollment evaluates a five-frame native-resolution burst, keeps the sharpest frame, rejects unusably small or soft face crops, and can derive conservative mirrored/tight references from that one capture.
+Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends a compact 640-pixel JPEG to CompreFace one request at a time and renders overlays at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.
 
 The bundled CompreFace defaults use one ML worker and reduced Java heap limits. Override `COMPREFACE_UWSGI_PROCESSES`, `COMPREFACE_API_JAVA_OPTS`, or `COMPREFACE_ADMIN_JAVA_OPTS` only on machines with more CPU and memory.
 
