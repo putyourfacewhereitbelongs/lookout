@@ -1,5 +1,7 @@
 import express from 'express';
 import { createServer } from 'node:http';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
@@ -37,10 +39,48 @@ function getLocalNetworkIp(): string {
   return '192.168.1.120';
 }
 
-// In-memory sync store for multi-device sync
-let sharedSyncStore: { timestamp: number; payload: string; deviceId: string } | null = null;
+// Shared state is encrypted at rest when LOOKOUT_SYNC_STORAGE_KEY is set. The
+// fallback is intentionally in-memory so local development does not require a
+// database, while production deployments can persist safely across restarts.
+type SharedSyncState = { timestamp: number; payload: string; deviceId: string };
 const SYNC_TOKEN = process.env.LOOKOUT_SYNC_TOKEN?.trim() || '';
+const SYNC_STORAGE_KEY = process.env.LOOKOUT_SYNC_STORAGE_KEY?.trim() || '';
+const SYNC_STORAGE_PATH = process.env.LOOKOUT_SYNC_STORAGE_PATH || path.join(process.cwd(), '.lookout', 'sync-state.enc');
 const syncClients = new Set<WebSocket>();
+
+function encryptionKey(): Buffer | null {
+  const secret = SYNC_STORAGE_KEY || SYNC_TOKEN;
+  return secret ? createHash('sha256').update(secret).digest() : null;
+}
+
+function loadEncryptedSyncState(): SharedSyncState | null {
+  const key = encryptionKey();
+  if (!key || !existsSync(SYNC_STORAGE_PATH)) return null;
+  try {
+    const [ivText, tagText, encryptedText] = readFileSync(SYNC_STORAGE_PATH, 'utf8').split(':');
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(ivText, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagText, 'base64'));
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(encryptedText, 'base64')), decipher.final()]).toString('utf8')) as SharedSyncState;
+  } catch {
+    return null;
+  }
+}
+
+function persistEncryptedSyncState(state: SharedSyncState): void {
+  const key = encryptionKey();
+  if (!key) return;
+  try {
+    mkdirSync(path.dirname(SYNC_STORAGE_PATH), { recursive: true });
+    const iv = randomBytes(12);
+    const cipher = createCipheriv('aes-256-gcm', key, iv);
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(state), 'utf8'), cipher.final()]);
+    writeFileSync(SYNC_STORAGE_PATH, [iv.toString('base64'), cipher.getAuthTag().toString('base64'), encrypted.toString('base64')].join(':'), { mode: 0o600 });
+  } catch {
+    // Storage failures never interrupt camera or recognition traffic.
+  }
+}
+
+let sharedSyncStore: SharedSyncState | null = loadEncryptedSyncState();
 
 function broadcastSync(message: unknown, except?: WebSocket): void {
   const encoded = JSON.stringify(message);
@@ -398,8 +438,15 @@ app.get('/api/stream/proxy', async (req, res) => {
   }
 });
 
+function syncRequestAuthorized(req: express.Request): boolean {
+  if (!SYNC_TOKEN) return true;
+  const bearer = req.header('authorization')?.replace(/^Bearer\s+/i, '') || '';
+  return bearer === SYNC_TOKEN || req.query.token === SYNC_TOKEN;
+}
+
 // Multi-device encrypted sync endpoint
 app.post('/api/sync/push', (req, res) => {
+  if (!syncRequestAuthorized(req)) return res.status(401).json({ error: 'Sync authentication required' });
   const { deviceId, payload } = req.body;
   if (!payload) {
     return res.status(400).json({ error: 'Missing payload' });
@@ -409,11 +456,13 @@ app.post('/api/sync/push', (req, res) => {
     deviceId: deviceId || 'anonymous_station',
     payload,
   };
+  persistEncryptedSyncState(sharedSyncStore);
   broadcastSync({ type: 'state', ...sharedSyncStore });
   res.json({ success: true, timestamp: sharedSyncStore.timestamp });
 });
 
 app.get('/api/sync/pull', (req, res) => {
+  if (!syncRequestAuthorized(req)) return res.status(401).json({ error: 'Sync authentication required' });
   if (!sharedSyncStore) {
     return res.json({ available: false });
   }
@@ -443,6 +492,7 @@ syncWss.on('connection', (socket, request) => {
       const message = JSON.parse(raw.toString());
       if (message?.type !== 'state' || typeof message.payload !== 'string' || message.payload.length > 8_000_000) return;
       sharedSyncStore = { timestamp: Date.now(), deviceId: String(message.deviceId || 'portal'), payload: message.payload };
+      persistEncryptedSyncState(sharedSyncStore);
       broadcastSync({ type: 'state', ...sharedSyncStore }, socket);
     } catch {
       socket.close(1003, 'Invalid sync message');

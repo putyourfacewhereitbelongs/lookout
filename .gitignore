@@ -10,4 +10,5 @@ dev-dist/
 
 # Logs and editor files
 *.log
+.lookout/
 .DS_Store
