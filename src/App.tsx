@@ -102,6 +102,8 @@ export function App() {
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>(StorageService.getHistoryEvents());
   const [liveAlert, setLiveAlert] = useState('');
   const [visualAlertFrame, setVisualAlertFrame] = useState('');
+  const [deliveryPending, setDeliveryPending] = useState(() => typeof window !== 'undefined' && localStorage.getItem('lookout_delivery_pending') === 'true');
+  const [deliveryDescription, setDeliveryDescription] = useState('Delivery vehicle or package activity detected; package may be outside the camera view.');
   const [cameraFeedError, setCameraFeedError] = useState('');
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [faceProfiles, setFaceProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
@@ -238,8 +240,21 @@ export function App() {
     return () => { active = false; };
   }, []);
 
-  // Save changes to local database
   useEffect(() => {
+    const deliverySubject = detectedObjects.find((object) => /(?:ups|u\.?s\.?ps|fed.?ex|amazon|usps|postal|mail|delivery|courier|package|parcel|box|truck|van)/i.test(`${object.label} ${object.nameTag || ''}`));
+    if (!deliverySubject || deliveryPending) return;
+    const description = /package|parcel|box/i.test(deliverySubject.label)
+      ? 'Package activity detected; it may have been placed outside the current camera view.'
+      : `${deliverySubject.label} detected; a delivery package may arrive or be placed outside the camera view.`;
+    setDeliveryDescription(description);
+    setDeliveryPending(true);
+    localStorage.setItem('lookout_delivery_pending', 'true');
+    setLiveAlert(`DELIVERY ALERT — ${description}`);
+    audioEngine.playAlertTone('perimeter_horn', 1);
+  }, [detectedObjects, deliveryPending]);
+
+  // Save changes to local database
+  useEffect(() => { 
     StorageService.saveCameras(cameras);
   }, [cameras]);
 
@@ -557,7 +572,13 @@ export function App() {
           for (const d of detections) {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
             if (topSubj && faceRecognitionService.isConservativeMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
+              const matchedProfile = StorageService.getFaceProfiles().find((profile) => profile.name.toLowerCase() === topSubj.subject.toLowerCase());
+              const isIntruder = matchedProfile?.role === 'intruder';
               StorageService.updateFaceLastSeenByName(topSubj.subject);
+              if (isIntruder) {
+                setLiveAlert(`INTRUDER ALERT — ${topSubj.subject} is present`);
+                audioEngine.playAlertTone('intruder_siren', 1);
+              }
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
               const now = Date.now();
               const faceHeight = Math.max(0, d.box.y_max - d.box.y_min) / snapH;
@@ -1152,6 +1173,9 @@ export function App() {
           overlayEnabled={sceneOverlayEnabled}
           onOverlayChange={setSceneOverlayEnabled}
         />
+        {deliveryPending && <div className="rounded-xl border border-amber-400/60 bg-amber-950/70 px-4 py-3 shadow-lg" role="status">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-xs font-bold uppercase tracking-wider text-amber-300">Delivery package pending</p><p className="mt-1 text-sm text-amber-50">{deliveryDescription}</p><p className="mt-1 text-[10px] text-amber-200/70">This reminder remains until you confirm the package alert is complete.</p></div><button type="button" onClick={() => { setDeliveryPending(false); localStorage.removeItem('lookout_delivery_pending'); setLiveAlert('Delivery alert acknowledged.'); }} className="rounded-lg bg-amber-400 px-3 py-2 font-mono text-xs font-bold text-black hover:bg-amber-300">ACKNOWLEDGE DELIVERY</button></div>
+        </div>}
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
         <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">

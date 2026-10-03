@@ -164,7 +164,7 @@ export interface FaceProfile {
   id: string;
   name: string;
   subjectType: 'person' | 'animal';
-  role: 'family' | 'friend' | 'pet' | 'wildlife' | 'intruder' | 'unknown';
+  role: '' | 'family' | 'friend' | 'guest' | 'need_permissions' | 'pet' | 'wildlife' | 'intruder' | 'unknown';
   thumbnail: string; // Data URL
   snapshots: string[];
   clusterId: string;

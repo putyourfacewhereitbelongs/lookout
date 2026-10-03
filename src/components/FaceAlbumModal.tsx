@@ -31,7 +31,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
   const [profiles, setProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
   const [editingProfile, setEditingProfile] = useState<FaceProfile | null>(null);
   const [editName, setEditName] = useState('');
-  const [editRole, setEditRole] = useState<FaceProfile['role']>('friend');
+  const [editRole, setEditRole] = useState<FaceProfile['role']>('');
   const [editType, setEditType] = useState<'person' | 'animal'>('person');
   const [editNotes, setEditNotes] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -87,7 +87,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
   const handleStartNaming = (profile: FaceProfile) => {
     setEditingProfile(profile);
     setEditName(profile.name.startsWith('Unknown') ? '' : profile.name);
-    setEditRole(profile.role === 'unknown' ? (profile.subjectType === 'animal' ? 'pet' : 'family') : profile.role);
+    setEditRole(profile.role === 'unknown' ? '' : profile.role);
     setEditType(profile.subjectType);
     setEditNotes(profile.notes || '');
     setRegistrationTarget('__new__');
@@ -465,8 +465,11 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                       onChange={(e) => setEditRole(e.target.value as any)}
                       className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-white"
                     >
+                      <option value="">Unassigned / choose later</option>
                       <option value="family">Family</option>
                       <option value="friend">Friend</option>
+                      <option value="guest">Guest</option>
+                      <option value="need_permissions">Need Permissions</option>
                       <option value="pet">Pet</option>
                       <option value="wildlife">Wildlife</option>
                       <option value="intruder">Intruder / Threat</option>
