@@ -388,6 +388,16 @@ export class StorageService {
     this.saveFaceProfiles(profiles);
   }
 
+  static deleteFaceSnapshot(profileId: string, snapshotIndex: number): void {
+    const profiles = this.getFaceProfiles().map((profile) => {
+      if (profile.id !== profileId) return profile;
+      const snapshots = (profile.snapshots || []).filter((_, index) => index !== snapshotIndex);
+      const thumbnail = snapshots[0] || '';
+      return { ...profile, snapshots, thumbnail };
+    });
+    this.saveFaceProfiles(profiles);
+  }
+
   // Emergency Contacts
   static getEmergencyContacts(): EmergencyContact[] {
     try {

@@ -61,6 +61,7 @@ import { RecordingsLibrary } from './components/RecordingsLibrary';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
+import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
 import { motion } from 'motion/react';
 
 // Real camera feeds: Local integrated hardware lens and Screen Capture
@@ -104,6 +105,7 @@ export function App() {
   const [cameraFeedError, setCameraFeedError] = useState('');
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [faceProfiles, setFaceProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
+  const [sceneOverlayEnabled, setSceneOverlayEnabled] = useState(true);
 
   // Advanced Settings State
   const [detectionSensitivities, setDetectionSensitivities] = useState<DetectionSensitivities>(
@@ -130,6 +132,7 @@ export function App() {
   const [isPhone, setIsPhone] = useState(() =>
     typeof window !== 'undefined' && window.matchMedia('(max-width: 767px), (pointer: coarse)').matches
   );
+  const [isBooting, setIsBooting] = useState(true);
 
   // State: Modals & Panels
   const [showQRModal, setShowQRModal] = useState(false);
@@ -210,6 +213,11 @@ export function App() {
     });
     setHistoryEvents(saved);
   }, [activeCamera, activeCamId]);
+
+  useEffect(() => {
+    const splashTimer = window.setTimeout(() => setIsBooting(false), 900);
+    return () => window.clearTimeout(splashTimer);
+  }, []);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px), (pointer: coarse)');
@@ -433,6 +441,7 @@ export function App() {
       if (!autoFaceRecordingRef.current && (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive')) {
         document.getElementById('record-toggle-btn')?.click();
         autoFaceRecordingRef.current = true;
+        audioEngine.playAlertTone('perimeter_horn', 1);
       }
       if (now - lastFaceAlertAtRef.current > 3500) {
         lastFaceAlertAtRef.current = now;
@@ -444,6 +453,7 @@ export function App() {
     } else if (autoFaceRecordingRef.current && now - lastFaceSeenAtRef.current > 2400) {
       document.getElementById('record-toggle-btn')?.click();
       autoFaceRecordingRef.current = false;
+      audioEngine.playAlertTone('radar_ping', 1);
       setLiveAlert('FACE LEFT SCENE — DVR CLIP SAVING');
       window.setTimeout(() => setLiveAlert((current) => current === 'FACE LEFT SCENE — DVR CLIP SAVING' ? '' : current), 2200);
     }
@@ -506,9 +516,27 @@ export function App() {
       try {
         const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1800;
         if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
-        const detections = useLongRange && recognitionCanvas
+        let detections = useLongRange && recognitionCanvas
           ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
           : await faceRecognitionService.recognize(snapshotBase64);
+        // Borderline identities get a second independent inference on the same
+        // high-resolution frame. A name survives only when both checks agree;
+        // a disagreement becomes an unknown face instead of a false alert.
+        const needsSecondCheck = detections.some((detection) => (detection.subjects?.[0]?.similarity || 0) < 0.96 && (detection.subjects?.length || 0) > 0);
+        if (needsSecondCheck) {
+          const secondPass = await faceRecognitionService.recognize(snapshotBase64);
+          detections = detections.map((detection) => {
+            const firstSubject = detection.subjects?.[0];
+            if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
+            const corroborating = secondPass.find((candidate) => {
+              const secondSubject = candidate.subjects?.[0];
+              const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
+              const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
+              return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < 90;
+            });
+            return corroborating ? { ...detection, subjects: [corroborating.subjects![0]] } : { ...detection, subjects: [] };
+          });
+        }
         syncFaceTriggeredDvr(detections.length > 0);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
@@ -693,15 +721,23 @@ export function App() {
       .filter(Boolean)
       .filter((value, index, values) => values.indexOf(value) === index)
       .slice(0, 8);
-    const person = detectedObjects.find((object) => object.category === 'person');
+    const people = detectedObjects.filter((object) => object.category === 'person');
+    const animals = detectedObjects.filter((object) => object.category === 'animal');
     const packageObject = detectedObjects.find((object) => /package|parcel|box|delivery/i.test(object.label));
     if (packageObject) return `${activeCamera.name}: a package or delivery is visible at the monitored entry area`;
-    if (person?.subjectName) return `${activeCamera.name}: ${person.subjectName} is present in the yard or driveway scene`;
-    if (person) return `${activeCamera.name}: a person is walking through the monitored yard or driveway`;
+    if (people.length > 1) {
+      const names = people.map((person) => person.subjectName || 'an unidentified person');
+      return `${activeCamera.name}: ${names[0]} appears to be talking with ${names.slice(1).join(' and ')}`;
+    }
+    if (people[0]?.subjectName) return `${activeCamera.name}: ${people[0].subjectName} is ${people[0].posture || 'present'} in the yard or driveway scene`;
+    if (people.length) return `${activeCamera.name}: a person is ${people[0].posture || 'moving'} through the monitored yard or driveway`;
+    if (animals.length) return `${activeCamera.name}: ${animals.map((animal) => animal.subjectName || animal.label).join(' and ')} ${animals[0].posture || 'is visible'} in the scene`;
     return visibleSubjects.length > 0
       ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
-      : `${activeCamera.name}: live camera scene`;
+      : `${activeCamera.name}: no active subjects; live camera scene is clear`;
   };
+
+  const liveSceneDetails = buildSceneDescription();
 
   // Handle Recording Toggle (captures the lightweight 30 FPS display stream)
   const handleToggleRecord = () => {
@@ -837,6 +873,10 @@ export function App() {
         return 'bg-zinc-950 text-red-100 selection:bg-red-600 selection:text-white';
       case 'light':
         return 'bg-slate-100 text-slate-900 selection:bg-cyan-500 selection:text-white';
+      case 'pink':
+        return 'bg-fuchsia-950 text-fuchsia-50 selection:bg-pink-500 selection:text-white';
+      case 'lime':
+        return 'bg-lime-950 text-lime-50 selection:bg-lime-500 selection:text-black';
       default:
         return 'bg-slate-950 text-slate-100 selection:bg-cyan-500 selection:text-black';
     }
@@ -869,6 +909,7 @@ export function App() {
 
   return (
     <div className={`app-shell min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
+      {isBooting && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black text-center text-white transition-opacity duration-500"><div><div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-fuchsia-500 border-t-lime-300" /><p className="font-mono text-sm font-bold tracking-[0.3em] text-fuchsia-300">LOOKOUT AI</p><p className="mt-2 text-xs text-slate-500">Loading local camera intelligence…</p></div></div>}
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
       {liveAlert && <div role="alert" className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/75 p-3 backdrop-blur-[2px] sm:p-8">
@@ -914,7 +955,7 @@ export function App() {
           {/* Quick Theme Mode Toggle */}
           <button
             onClick={() => {
-              const cycle: UIThemeMode[] = ['dark', 'oled', 'tactical_nvg', 'light'];
+              const cycle: UIThemeMode[] = ['pink', 'lime', 'oled', 'dark', 'tactical_nvg', 'light'];
               const next = cycle[(cycle.indexOf(currentTheme) + 1) % cycle.length];
               setCurrentTheme(next);
             }}
@@ -1102,7 +1143,15 @@ export function App() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
+          <SceneCaptionOverlay details={liveSceneDetails} enabled={sceneOverlayEnabled} />
         </motion.div>
+
+        <SceneDetailsPanel
+          details={liveSceneDetails}
+          detections={detectedObjects}
+          overlayEnabled={sceneOverlayEnabled}
+          onOverlayChange={setSceneOverlayEnabled}
+        />
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}
         <div className="flex flex-col gap-2 rounded-2xl border border-slate-800 bg-slate-900/90 p-3 shadow-xl sm:p-4">
@@ -1308,8 +1357,10 @@ export function App() {
           <Shield className="w-4 h-4 text-cyan-400" />
           <span>Lookout AI • Next-Gen PWA Surveillance Hub</span>
         </div>
-        <div>
-          Recognition-First Low-CPU Mode • Local Biometric Data • 30 FPS Display
+        <div className="max-w-2xl text-center">
+          Recognition-First Low-CPU Mode • Local Biometric Data • 30 FPS Display<br />
+          Created by Brian Cross using Trill AI for references, CompreFace for inference and recognition, and NodeJS testing.
+          <span className="mt-1 block text-[10px] text-slate-600">Privacy notice: obtain informed permission before adding any person to a recognition database. Unauthorized biometric identification may violate privacy laws and can result in legal action. Use this app lawfully; you are responsible for alerts, recordings, data security, and any harm or liability arising from its use.</span>
         </div>
       </footer>
 

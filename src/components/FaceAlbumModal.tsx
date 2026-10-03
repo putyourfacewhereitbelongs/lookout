@@ -154,6 +154,14 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
     }
   };
 
+  const handleDeleteSnapshot = (profileId: string, index: number) => {
+    StorageService.deleteFaceSnapshot(profileId, index);
+    const updated = StorageService.getFaceProfiles();
+    setProfiles(updated);
+    setEditingProfile(updated.find((profile) => profile.id === profileId) || null);
+    if (onProfileUpdated) onProfileUpdated();
+  };
+
   return (
     <div className="mobile-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-fade-in">
       <div className="mobile-dialog flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 text-slate-100 shadow-2xl">
@@ -389,6 +397,20 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                   <div className="text-slate-500 text-[10px]">
                     {editingProfile.snapshots.length} reference images recorded
                   </div>
+                </div>
+              </div>
+
+              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-3">
+                <div className="mb-2 flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-slate-400">
+                  <span>Saved snapshots • each photo is independent</span><span>{editingProfile.snapshots.length}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2">
+                  {editingProfile.snapshots.map((snapshot, index) => (
+                    <div key={`${editingProfile.id}-snapshot-${index}`} className="group relative aspect-square overflow-hidden rounded-lg border border-slate-700 bg-slate-900">
+                      <img src={snapshot} alt={`${editingProfile.name} snapshot ${index + 1}`} className="h-full w-full object-cover" />
+                      <button type="button" onClick={() => handleDeleteSnapshot(editingProfile.id, index)} className="absolute right-1 top-1 rounded bg-black/80 p-1 text-red-300 opacity-0 transition group-hover:opacity-100" aria-label={`Delete snapshot ${index + 1}`} title="Delete this snapshot"><Trash2 className="h-3 w-3" /></button>
+                    </div>
+                  ))}
                 </div>
               </div>
 

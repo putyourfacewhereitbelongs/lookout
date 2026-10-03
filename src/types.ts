@@ -286,7 +286,7 @@ export interface StoragePreferences {
   faceMatchThreshold: number;
 }
 
-export type UIThemeMode = 'dark' | 'light' | 'oled' | 'tactical_nvg';
+export type UIThemeMode = 'dark' | 'light' | 'oled' | 'tactical_nvg' | 'pink' | 'lime';
 
 export interface VideoProcessingSettings {
   videoBackgroundErase: boolean;
