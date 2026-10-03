@@ -151,6 +151,10 @@ export function App() {
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
+  const autoFaceRecordingRef = useRef(false);
+  const lastFaceSeenAtRef = useRef(0);
+  const lastLongRangeScanAtRef = useRef(0);
+  const lastFaceAlertAtRef = useRef(0);
   const activeCamera = cameras.find((c) => c.id === activeCamId) || cameras[0];
   const eventCooldownsRef = useRef<Map<string, number>>(new Map());
   const faceApproachRef = useRef<Map<string, { baseHeight: number; maxHeight: number; lastSeen: number; approachLogged: boolean }>>(new Map());
@@ -422,8 +426,31 @@ export function App() {
     };
   }, [isPhone]);
 
+  const syncFaceTriggeredDvr = (faceDetected: boolean) => {
+    const now = Date.now();
+    if (faceDetected) {
+      lastFaceSeenAtRef.current = now;
+      if (!autoFaceRecordingRef.current && (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive')) {
+        document.getElementById('record-toggle-btn')?.click();
+        autoFaceRecordingRef.current = true;
+      }
+      if (now - lastFaceAlertAtRef.current > 3500) {
+        lastFaceAlertAtRef.current = now;
+        const frame = canvasRef.current;
+        if (frame) setVisualAlertFrame(frame.toDataURL('image/jpeg', 0.88));
+        setLiveAlert('FACE DETECTED — DVR RECORDING ACTIVE');
+        window.setTimeout(() => setLiveAlert((current) => current === 'FACE DETECTED — DVR RECORDING ACTIVE' ? '' : current), 2200);
+      }
+    } else if (autoFaceRecordingRef.current && now - lastFaceSeenAtRef.current > 2400) {
+      document.getElementById('record-toggle-btn')?.click();
+      autoFaceRecordingRef.current = false;
+      setLiveAlert('FACE LEFT SCENE — DVR CLIP SAVING');
+      window.setTimeout(() => setLiveAlert((current) => current === 'FACE LEFT SCENE — DVR CLIP SAVING' ? '' : current), 2200);
+    }
+  };
+
   // Continuous CompreFace Facial Recognition Cycle:
-  // Low-latency neural face recognition via CompreFace proxy,
+  // Low-latency neural face recognition via CompreFace proxy, 
   // identifies registered subjects ("Brian", "Heather", "Malcolm", etc.), and always follows the person.
   useEffect(() => {
     let isMounted = true;
@@ -466,6 +493,7 @@ export function App() {
       }
 
       if (!snapshotBase64) {
+        syncFaceTriggeredDvr(false);
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
       }
@@ -476,7 +504,12 @@ export function App() {
       }
 
       try {
-        const detections = await faceRecognitionService.recognize(snapshotBase64);
+        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1800;
+        if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
+        const detections = useLongRange && recognitionCanvas
+          ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
+          : await faceRecognitionService.recognize(snapshotBase64);
+        syncFaceTriggeredDvr(detections.length > 0);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
@@ -486,7 +519,7 @@ export function App() {
             detections,
             snapW,
             snapH,
-            storagePreferences.faceMatchThreshold || 0.92,
+            Math.max(0.97, storagePreferences.faceMatchThreshold || 0.92),
             StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
           );
           detectedObjectsRef.current = updated;
@@ -495,7 +528,7 @@ export function App() {
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
           for (const d of detections) {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
-            if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
+            if (topSubj && faceRecognitionService.isConservativeMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
               StorageService.updateFaceLastSeenByName(topSubj.subject);
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
               const now = Date.now();

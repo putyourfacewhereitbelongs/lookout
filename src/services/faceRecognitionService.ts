@@ -1,6 +1,8 @@
 import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
 
-const PERSON_TRACK_RETENTION_MS = 2200;
+// A face should disappear quickly after the detector loses it. Keeping a
+// person alive for multiple seconds is a common source of "ghost" sightings.
+const PERSON_TRACK_RETENTION_MS = 650;
 const LONG_RANGE_TILE_COLUMNS = 3;
 const LONG_RANGE_TILE_ROWS = 2;
 const LONG_RANGE_TILE_WIDTH_RATIO = 0.46;
@@ -336,6 +338,14 @@ export class FaceRecognitionService {
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
   }
 
+  /** Stricter gate used before a name can trigger an alert or DVR event. */
+  isConservativeMatch(detection: CompreFaceDetection, threshold: number): boolean {
+    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
+    const requiredSimilarity = Math.max(0.96, Math.min(0.995, threshold));
+    return Boolean(best && detection.box.probability >= 0.70 && best.similarity >= requiredSimilarity &&
+      (!runnerUp || best.similarity - runnerUp.similarity >= 0.10));
+  }
+
   /**
    * Fetch all registered subjects from CompreFace database
    */
@@ -529,7 +539,9 @@ export class FaceRecognitionService {
         bestMatch.nameTag = nameTag;
         bestMatch.category = category;
         bestMatch.isKnown = isRecognized;
-        bestMatch.subjectName = subjectName || bestMatch.subjectName;
+        // Never carry a previously recognized name into a new low-confidence
+        // observation. That stale identity is how false "still here" alerts happen.
+        bestMatch.subjectName = isRecognized ? subjectName : '';
         bestMatch.confidence = topSubject ? topSubject.similarity : d.box.probability;
         bestMatch.age = d.age;
         bestMatch.gender = d.gender;
