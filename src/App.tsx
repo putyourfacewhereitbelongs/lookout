@@ -68,6 +68,7 @@ import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
 import { narrateScene } from './services/sceneNarrator';
+import { FacePresenceTracker } from './services/faceDetectionGate';
 import { audioCueService, captureElementAudio } from './services/audioCueService';
 import { AudioCueOverlay } from './components/AudioCueOverlay';
 import { CUE_SEVERITY } from './services/audioCueClassifier';
@@ -470,6 +471,9 @@ export function App() {
   const accessibilityRef = useRef(accessibility);
 
   const camerasRef = useRef(cameras);
+  // Confirms a face across consecutive recognition scans before the app
+  // reacts to it, which is what prevents empty-scene "face detected" alerts.
+  const facePresenceRef = useRef(new FacePresenceTracker());
 
   useEffect(() => { activeCameraRef.current = activeCamera; }, [activeCamera]);
   useEffect(() => { camerasRef.current = cameras; }, [cameras]);
@@ -586,6 +590,8 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
     let timer: any = null;
+    // Switching cameras must not inherit the previous view's confirmations.
+    facePresenceRef.current.reset();
 
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
@@ -624,6 +630,9 @@ export function App() {
       }
 
       if (!snapshotBase64) {
+        // No frame means no evidence of anyone; clear accumulated presence so
+        // a resumed feed must re-confirm from scratch.
+        facePresenceRef.current.reset();
         syncFaceTriggeredDvr(false);
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
@@ -639,13 +648,13 @@ export function App() {
         if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
         let detections = useLongRange && recognitionCanvas
           ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
-          : await faceRecognitionService.recognize(snapshotBase64);
+          : await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
         // Borderline identities get a second independent inference on the same
         // high-resolution frame. A name survives only when both checks agree;
         // a disagreement becomes an unknown face instead of a false alert.
         const needsSecondCheck = detections.some((detection) => (detection.subjects?.[0]?.similarity || 0) < 0.96 && (detection.subjects?.length || 0) > 0);
         if (needsSecondCheck) {
-          const secondPass = await faceRecognitionService.recognize(snapshotBase64);
+          const secondPass = await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
           detections = detections.map((detection) => {
             const firstSubject = detection.subjects?.[0];
             if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
@@ -658,7 +667,12 @@ export function App() {
             return corroborating ? { ...detection, subjects: [corroborating.subjects![0]] } : { ...detection, subjects: [] };
           });
         }
-        syncFaceTriggeredDvr(detections.length > 0);
+        // A real person appears in consecutive scans at a consistent place;
+        // detector pareidolia on foliage, wood grain, or sensor noise flickers
+        // in and out. Only confirmed faces may drive alerts, DVR, or tracking.
+        const presence = facePresenceRef.current.update(detections);
+        detections = presence.confirmed;
+        syncFaceTriggeredDvr(presence.facePresent);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {

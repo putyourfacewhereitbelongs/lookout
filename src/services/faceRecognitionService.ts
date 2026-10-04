@@ -1,4 +1,5 @@
 import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
+import { filterImplausibleFaces } from './faceDetectionGate';
 
 // A face should disappear quickly after the detector loses it. Keeping a
 // person alive for multiple seconds is a common source of "ghost" sightings.
@@ -182,6 +183,8 @@ export function shouldRunLongRangeTiles(
 export class FaceRecognitionService {
   private static instance: FaceRecognitionService;
   private isProcessing = false;
+  /** Count of boxes rejected as implausible, surfaced for diagnostics. */
+  public suppressedFaceCount = 0;
   private lastRecognitionError = '';
 
   getLastRecognitionError(): string {
@@ -196,12 +199,12 @@ export class FaceRecognitionService {
   }
 
   /** Calls CompreFace through the backend proxy with landmarks only. */
-  async recognize(imageBase64: string): Promise<CompreFaceDetection[]> {
+  async recognize(imageBase64: string, frameWidth = 0, frameHeight = 0): Promise<CompreFaceDetection[]> {
     if (this.isProcessing) return [];
     this.isProcessing = true;
 
     try {
-      const result = await this.requestRecognition(imageBase64, 'standard');
+      const result = await this.requestRecognition(imageBase64, 'standard', frameWidth, frameHeight);
       this.lastRecognitionError = '';
       return result;
     } catch (err) {
@@ -227,7 +230,7 @@ export class FaceRecognitionService {
     this.isProcessing = true;
 
     try {
-      const primary = await this.requestRecognition(imageBase64, 'standard');
+      const primary = await this.requestRecognition(imageBase64, 'standard', sourceFrame.width, sourceFrame.height);
       if (!shouldRunLongRangeTiles(primary, sourceFrame.width, sourceFrame.height)) {
         this.lastRecognitionError = '';
         return primary;
@@ -240,7 +243,7 @@ export class FaceRecognitionService {
       for (let start = 0; start < tiles.length; start += 2) {
         const results = await Promise.all(tiles.slice(start, start + 2).map(async (tile) => {
           try {
-            const detections = await this.requestRecognition(tile.imageBase64, 'distant');
+            const detections = await this.requestRecognition(tile.imageBase64, 'distant', tile.imageWidth, tile.imageHeight);
             return detections.map((detection) => mapDetectionFromTile(detection, tile, tile.imageWidth, tile.imageHeight));
           } catch (error) {
             // A single slow tile should not discard normal-pass results or
@@ -263,7 +266,12 @@ export class FaceRecognitionService {
     }
   }
 
-  private async requestRecognition(imageBase64: string, detectionProfile: 'standard' | 'distant'): Promise<CompreFaceDetection[]> {
+  private async requestRecognition(
+    imageBase64: string,
+    detectionProfile: 'standard' | 'distant',
+    frameWidth: number,
+    frameHeight: number,
+  ): Promise<CompreFaceDetection[]> {
     const res = await fetch('/api/recognition/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -276,7 +284,16 @@ export class FaceRecognitionService {
     }
 
     const data = await res.json();
-    return Array.isArray(data.result) ? data.result : [];
+    const raw: CompreFaceDetection[] = Array.isArray(data.result) ? data.result : [];
+    // Discard implausible boxes at the source so no downstream consumer —
+    // tracking, alerts, DVR, or scene narration — ever sees a phantom face.
+    // Frame dimensions are those of the image actually submitted, which is
+    // the pixel space the detector reports its boxes in.
+    const filtered = filterImplausibleFaces(raw, frameWidth, frameHeight, detectionProfile);
+    if (filtered.length !== raw.length) {
+      this.suppressedFaceCount += raw.length - filtered.length;
+    }
+    return filtered;
   }
 
   private createLongRangeTiles(sourceFrame: HTMLCanvasElement): Array<EncodedFaceTile & { imageWidth: number; imageHeight: number }> {
