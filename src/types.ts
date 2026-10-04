@@ -261,6 +261,12 @@ export interface AlertNotificationSettings {
   ttsVoiceEnabled: boolean;
   ttsVoiceRate: number;
   ttsVoicePitch: number;
+  /** Speak the recognized person's name; off announces "a known person". */
+  announceIdentityNames: boolean;
+  /** Attach a short looping GIF of the live feed to each alert. */
+  gifAlertPreviews: boolean;
+  /** How long a corner notification stays on screen before auto-dismissing. */
+  bannerDurationSeconds: number;
 }
 
 export interface PWASettings {

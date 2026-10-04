@@ -87,6 +87,25 @@ All optional settings are documented in [`.env.example`](.env.example). Docker C
 
 The CompreFace images are pinned to upstream version `1.2.0` and follow its [official multi-service Compose architecture](https://github.com/exadel-inc/CompreFace/blob/master/docker-compose.yml). The database, API, admin, ML core, and UI remain on the internal Docker network; only the Lookout and CompreFace UI ports are published.
 
+## Face alert notifications
+
+Alerts never cover the live feed. When a face is detected, Lookout raises a compact card in the corner of the screen that shows:
+
+- the cropped face that triggered the alert, taken from the camera's native pixels;
+- who it is ("Brian identified"), the camera, the time, and the match confidence;
+- a smooth looping GIF of the feed around the moment of the alert, encoded locally with no third-party library and saveable with one click;
+- a spoken announcement through the browser's speech synthesizer, for example "Brian has been identified on Front Door, 97 percent match."
+
+Hovering a card pauses its countdown, `Esc` clears the stack, and repeated sightings of the same subject are throttled by the alert cooldown. Everything is configurable in **Settings -> Alerts & Tones -> Face Notification Pop-ups**:
+
+| Setting | Effect |
+| --- | --- |
+| Animated GIF preview | Attach a looping GIF of the live feed to each alert |
+| Speak the identified name | Say the person's name, or announce "a known person" instead |
+| Notification on-screen time | 3-30 seconds; critical alerts stay up longer automatically |
+| Quiet hours | Keep the cards visible while muting tones and speech |
+| Send a test face notification | Preview exactly how an identification looks and sounds |
+
 ## Low-CPU recognition mode
 
 Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends a compact 640-pixel JPEG to CompreFace one request at a time and renders overlays at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.

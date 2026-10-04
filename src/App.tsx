@@ -13,7 +13,6 @@ import {
   Camera,
   Maximize2,
   Radio,
-  AlertTriangle,
   Play,
   Square,
   Layers,
@@ -51,6 +50,9 @@ import { faceRecognitionService } from './services/faceRecognitionService';
 import { liveSyncService } from './services/liveSyncService';
 import { petRecognitionService } from './services/petRecognitionService';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
+import { alertCenter, PushAlertInput } from './services/alertCenter';
+import { captureCanvasGif } from './services/gifEncoder';
+import { createFaceThumbnail } from './services/faceThumbnail';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { QRCodeModal } from './components/QRCodeModal';
@@ -63,6 +65,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
+import { AlertToastStack } from './components/AlertToastStack';
 import { motion } from 'motion/react';
 
 // Real camera feeds: Local integrated hardware lens and Screen Capture
@@ -101,8 +104,6 @@ export function App() {
   const [emergencyContacts, setEmergencyContacts] = useState<EmergencyContact[]>(StorageService.getEmergencyContacts());
   const [recordings, setRecordings] = useState<SavedRecording[]>(StorageService.getRecordings());
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>(StorageService.getHistoryEvents());
-  const [liveAlert, setLiveAlert] = useState('');
-  const [visualAlertFrame, setVisualAlertFrame] = useState('');
   const [deliveryPending, setDeliveryPending] = useState(() => typeof window !== 'undefined' && localStorage.getItem('lookout_delivery_pending') === 'true');
   const [deliveryDescription, setDeliveryDescription] = useState('Delivery vehicle or package activity detected; package may be outside the camera view.');
   const [cameraFeedError, setCameraFeedError] = useState('');
@@ -166,6 +167,7 @@ export function App() {
   const faceApproachRef = useRef<Map<string, { baseHeight: number; maxHeight: number; lastSeen: number; approachLogged: boolean }>>(new Map());
   const cameraMotionRef = useRef<{ previous: Uint8Array | null; suppressUntil: number }>({ previous: null, suppressUntil: 0 });
   const motionSampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const gifCaptureBusyRef = useRef(false);
 
   const detectGlobalCameraMotion = useCallback((frame: HTMLCanvasElement) => {
     if (!detectionSensitivities.fixedCameraGuard) return false;
@@ -217,6 +219,40 @@ export function App() {
     setHistoryEvents(saved);
   }, [activeCamera, activeCamId]);
 
+  /**
+   * Raise a corner notification instead of a full-screen takeover. The live
+   * feed stays visible, the detected face is shown in the toast, the alert is
+   * spoken aloud, and a short looping GIF of the feed is encoded in the
+   * background and attached to the same notification when it is ready.
+   */
+  const notifyAlert = useCallback((input: PushAlertInput & { captureGif?: boolean }) => {
+    const { captureGif = true, ...alert } = input;
+    const id = alertCenter.push({ cameraName: activeCameraRef.current?.name, ...alert });
+    if (!id) return null;
+    const canvas = canvasRef.current;
+    // Only one capture runs at a time so overlapping alerts cannot stack
+    // several per-frame pixel reads on top of the live render loop.
+    if (!captureGif || !canvas || !alertNotifications.gifAlertPreviews || gifCaptureBusyRef.current) return id;
+    gifCaptureBusyRef.current = true;
+    alertCenter.markGifPending(id);
+    captureCanvasGif(canvas, {
+      frameCount: isPhone ? 10 : 14,
+      intervalMs: isPhone ? 110 : 90,
+      maxWidth: isPhone ? 240 : 320,
+      maxColors: isPhone ? 96 : 128,
+    })
+      .then((gifUrl) => alertCenter.attachGif(id, gifUrl))
+      .catch((error) => {
+        console.warn('Alert GIF capture failed:', error);
+        alertCenter.failGif(id);
+      })
+      .finally(() => { gifCaptureBusyRef.current = false; });
+    return id;
+  }, [alertNotifications.gifAlertPreviews, isPhone]);
+
+  // Keep the alert engine in sync with the saved notification preferences.
+  useEffect(() => { alertCenter.setSettings(alertNotifications); }, [alertNotifications]);
+
   useEffect(() => {
     const splashTimer = window.setTimeout(() => setIsBooting(false), 900);
     liveSyncService.connect();
@@ -264,9 +300,16 @@ export function App() {
     setDeliveryDescription(description);
     setDeliveryPending(true);
     localStorage.setItem('lookout_delivery_pending', 'true');
-    setLiveAlert(`DELIVERY ALERT — ${description}`);
-    audioEngine.playAlertTone('perimeter_horn', 1);
-  }, [detectedObjects, deliveryPending]);
+    notifyAlert({
+      title: 'Delivery activity detected',
+      message: description,
+      severity: 'warning',
+      tone: 'perimeter_horn',
+      dedupeKey: 'delivery',
+      cooldownMs: 120_000,
+      speech: 'Delivery activity detected. A package may have been left outside the camera view.',
+    });
+  }, [detectedObjects, deliveryPending, notifyAlert]);
 
   // Save changes to local database
   useEffect(() => {
@@ -475,17 +518,32 @@ export function App() {
       }
       if (now - lastFaceAlertAtRef.current > 3500) {
         lastFaceAlertAtRef.current = now;
-        const frame = canvasRef.current;
-        if (frame) setVisualAlertFrame(frame.toDataURL('image/jpeg', 0.88));
-        setLiveAlert('FACE DETECTED — DVR RECORDING ACTIVE');
-        window.setTimeout(() => setLiveAlert((current) => current === 'FACE DETECTED — DVR RECORDING ACTIVE' ? '' : current), 2200);
+        notifyAlert({
+          title: 'Face detected',
+          message: 'A face entered the scene and DVR recording started automatically.',
+          severity: 'info',
+          dedupeKey: 'dvr-face-start',
+          cooldownMs: 20_000,
+          playTone: false,
+          speak: false,
+          durationMs: 5000,
+        });
       }
     } else if (autoFaceRecordingRef.current && now - lastFaceSeenAtRef.current > 2400) {
       document.getElementById('record-toggle-btn')?.click();
       autoFaceRecordingRef.current = false;
       audioEngine.playAlertTone('radar_ping', 1);
-      setLiveAlert('FACE LEFT SCENE — DVR CLIP SAVING');
-      window.setTimeout(() => setLiveAlert((current) => current === 'FACE LEFT SCENE — DVR CLIP SAVING' ? '' : current), 2200);
+      notifyAlert({
+        title: 'Scene clear',
+        message: 'The face left the view and the DVR clip is being saved.',
+        severity: 'info',
+        dedupeKey: 'dvr-face-end',
+        cooldownMs: 20_000,
+        playTone: false,
+        speak: false,
+        durationMs: 4000,
+        captureGif: false,
+      });
     }
   };
 
@@ -590,9 +648,30 @@ export function App() {
               const matchedProfile = StorageService.getFaceProfiles().find((profile) => profile.name.toLowerCase() === topSubj.subject.toLowerCase());
               const isIntruder = matchedProfile?.role === 'intruder';
               StorageService.updateFaceLastSeenByName(topSubj.subject);
+              // The notification shows the face that triggered it, so crop a
+              // small avatar straight from the sharpest available source.
+              const identityThumbnail = createFaceThumbnail({
+                box: d.box,
+                frameWidth: snapW,
+                frameHeight: snapH,
+                video,
+                fallback: recognitionCanvas,
+                outputSize: 256,
+                quality: 0.86,
+              });
               if (isIntruder) {
-                setLiveAlert(`INTRUDER ALERT — ${topSubj.subject} is present`);
-                audioEngine.playAlertTone('intruder_siren', 1);
+                notifyAlert({
+                  title: `Intruder identified: ${topSubj.subject}`,
+                  message: `${topSubj.subject} is flagged as an intruder and is present in the camera view.`,
+                  severity: 'critical',
+                  subjectName: topSubj.subject,
+                  confidence: topSubj.similarity,
+                  faceImage: identityThumbnail,
+                  tone: 'intruder_siren',
+                  dedupeKey: `intruder:${topSubj.subject.toLowerCase()}`,
+                  cooldownMs: 30_000,
+                  speech: `Warning. ${topSubj.subject} has been identified and is flagged as an intruder.`,
+                });
               }
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
               const now = Date.now();
@@ -606,7 +685,16 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `face:${identityKey}`, 60_000);
-                showScanFeedback(`${topSubj.subject} arrived or is present in the monitored scene.`);
+                if (!isIntruder) notifyAlert({
+                  title: `${topSubj.subject} identified`,
+                  message: `${topSubj.subject} was matched to a saved face profile and is present in the scene.`,
+                  severity: 'info',
+                  subjectName: topSubj.subject,
+                  confidence: topSubj.similarity,
+                  faceImage: identityThumbnail,
+                  dedupeKey: `identity:${identityKey}`,
+                  cooldownMs: 60_000,
+                });
               } else {
                 const approached = !previous.approachLogged && previous.baseHeight > 0 && faceHeight >= previous.baseHeight * 1.5 && faceHeight - previous.baseHeight >= 0.035;
                 faceApproachRef.current.set(identityKey, {
@@ -622,59 +710,28 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `approach:${identityKey}`, 60_000);
+                if (approached) notifyAlert({
+                  title: `${topSubj.subject} is approaching`,
+                  message: `${topSubj.subject} moved noticeably closer to the camera.`,
+                  severity: 'warning',
+                  subjectName: topSubj.subject,
+                  confidence: topSubj.similarity,
+                  faceImage: identityThumbnail,
+                  dedupeKey: `approach-alert:${identityKey}`,
+                  cooldownMs: 60_000,
+                  speech: `${topSubj.subject} is approaching the camera.`,
+                });
               }
             } else {
-              let faceCrop: string | undefined;
-              if (recognitionCanvas && d.box) {
-                // Recognition intentionally uses a compact frame, but the saved
-                // snapshot should come from the camera's native pixels. The old
-                // 192px crop was both soft and stretched when a face box was not
-                // square. Build a padded square in recognition coordinates, map
-                // it back to the native video, and only then upscale it to a
-                // consistent HD-ish profile image.
-                const faceWidth = d.box.x_max - d.box.x_min;
-                const faceHeight = d.box.y_max - d.box.y_min;
-                const paddingX = faceWidth * 0.28;
-                const paddingY = faceHeight * 0.28;
-                const paddedWidth = faceWidth + paddingX * 2;
-                const paddedHeight = faceHeight + paddingY * 2;
-                const squareSize = Math.max(paddedWidth, paddedHeight);
-                const centerX = (d.box.x_min + d.box.x_max) / 2;
-                const centerY = (d.box.y_min + d.box.y_max) / 2;
-                const sx = Math.max(0, Math.min(snapW - squareSize, centerX - squareSize / 2));
-                const sy = Math.max(0, Math.min(snapH - squareSize, centerY - squareSize / 2));
-                const cropSize = Math.min(squareSize, snapW - sx, snapH - sy);
-                if (cropSize > 0) {
-                  const source = video && video.videoWidth > 0 ? video : recognitionCanvas;
-                  const sourceWidth = source === video ? video.videoWidth : snapW;
-                  const sourceHeight = source === video ? video.videoHeight : snapH;
-                  const scaleX = sourceWidth / snapW;
-                  const scaleY = sourceHeight / snapH;
-                  const cropCanvas = document.createElement('canvas');
-                  // A 1024px square keeps the profile sharp on HD/retina
-                  // displays, while the native video remains the source of truth.
-                  const outputSize = 1024;
-                  cropCanvas.width = outputSize;
-                  cropCanvas.height = outputSize;
-                  const cropContext = cropCanvas.getContext('2d');
-                  if (cropContext) {
-                    cropContext.imageSmoothingEnabled = true;
-                    cropContext.imageSmoothingQuality = 'high';
-                    cropContext.drawImage(
-                      source,
-                      sx * scaleX,
-                      sy * scaleY,
-                      cropSize * scaleX,
-                      cropSize * scaleY,
-                      0,
-                      0,
-                      outputSize,
-                      outputSize
-                    );
-                    faceCrop = cropCanvas.toDataURL('image/jpeg', 0.94);
-                  }
-                }
-              }
+              const faceCrop = createFaceThumbnail({
+                box: d.box,
+                frameWidth: snapW,
+                frameHeight: snapH,
+                video,
+                fallback: recognitionCanvas,
+                outputSize: 1024,
+                quality: 0.94,
+              });
               // Animal profiles are recognized locally against their enrolled
               // reference photos, independently of CompreFace's human-face
               // database. This turns the existing animal album into a true pet
@@ -705,7 +762,17 @@ export function App() {
                     subjectName: petMatch.profile.name,
                     confidence: petMatch.similarity,
                   }, `animal:${activeCamId}:${petMatch.profile.name}`, 60_000);
-                  showScanFeedback(`${petMatch.profile.name} was recognized in the monitored yard or driveway.`);
+                  notifyAlert({
+                    title: `${petMatch.profile.name} recognized`,
+                    message: `${petMatch.profile.name} was recognized locally from its enrolled animal photos.`,
+                    severity: 'info',
+                    subjectName: petMatch.profile.name,
+                    confidence: petMatch.similarity,
+                    faceImage: faceCrop,
+                    dedupeKey: `animal-alert:${activeCamId}:${petMatch.profile.name}`,
+                    cooldownMs: 60_000,
+                    speech: `${petMatch.profile.name} has been identified in the monitored area.`,
+                  });
                   continue;
                 }
               }
@@ -715,6 +782,15 @@ export function App() {
                 'Face captured from CompreFace detection. Review and assign to a person, or save it as an animal profile for local pet recognition.',
                 faceCrop
               );
+              notifyAlert({
+                title: 'Unidentified person detected',
+                message: 'An unknown face was captured and saved to the face album for review.',
+                severity: 'warning',
+                faceImage: faceCrop,
+                dedupeKey: `unknown-face:${activeCamId}`,
+                cooldownMs: 45_000,
+                speech: 'An unidentified person has been detected.',
+              });
             }
           }
           setFaceProfiles(StorageService.getFaceProfiles());
@@ -736,7 +812,7 @@ export function App() {
       isMounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, isPhone]);
+  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, notifyAlert, isPhone]);
 
   // Recording Clock Timer
   useEffect(() => {
@@ -933,14 +1009,17 @@ export function App() {
     return { imageBase64: frame.toDataURL('image/jpeg', isPhone ? 0.84 : 0.90), width, height, canvas: frame };
   };
 
+  /** Short status toast used by the manual scan controls. */
   const showScanFeedback = (message: string) => {
-    setLiveAlert(message);
-    const canvas = canvasRef.current;
-    if (canvas) setVisualAlertFrame(canvas.toDataURL('image/jpeg', 0.86));
-    window.setTimeout(() => {
-      setLiveAlert((current) => current === message ? '' : current);
-      setVisualAlertFrame((current) => current ? '' : current);
-    }, 6000);
+    notifyAlert({
+      title: 'Face scan',
+      message,
+      severity: 'info',
+      speak: false,
+      playTone: false,
+      durationMs: 6000,
+      captureGif: false,
+    });
   };
 
   return (
@@ -948,16 +1027,9 @@ export function App() {
       {isBooting && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black text-center text-white transition-opacity duration-500"><div><div className="mx-auto mb-4 h-16 w-16 animate-spin rounded-full border-4 border-fuchsia-500 border-t-lime-300" /><p className="font-mono text-sm font-bold tracking-[0.3em] text-fuchsia-300">LOOKOUT AI</p><p className="mt-2 text-xs text-slate-500">Loading local camera intelligence…</p></div></div>}
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
-      {liveAlert && <div role="alert" className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-black/75 p-3 backdrop-blur-[2px] sm:p-8">
-        <div className="relative flex h-full max-h-[min(82vh,720px)] w-full max-w-5xl items-end overflow-hidden rounded-2xl border-2 border-amber-400/80 bg-slate-950 shadow-2xl shadow-amber-950/50">
-          {visualAlertFrame ? <img src={visualAlertFrame} alt="Animated camera alert preview" className="absolute inset-0 h-full w-full object-cover opacity-80 alert-video-preview" /> : <div className="absolute inset-0 bg-gradient-to-br from-amber-950 via-slate-950 to-black" />}
-          <div className="absolute inset-0 alert-video-scanline" />
-          <div className="relative m-3 w-full rounded-xl border border-amber-400/60 bg-black/75 p-4 text-amber-50 backdrop-blur-md sm:m-6 sm:p-6">
-            <div className="flex items-center gap-2 text-xs font-mono font-bold uppercase tracking-widest text-amber-300"><AlertTriangle className="h-5 w-5 animate-pulse" /> Video alert • live scene preview</div>
-            <p className="mt-2 text-lg font-bold sm:text-2xl">{liveAlert}</p>
-          </div>
-        </div>
-      </div>}
+      {/* Non-blocking corner notifications: face preview, animated GIF of the
+          feed, and a spoken announcement of who was identified. */}
+      <AlertToastStack />
 
       {/* TOP PERSISTENT NAVIGATION BAR */}
       <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/90 px-3 py-2.5 shadow-lg backdrop-blur-md sm:flex-nowrap sm:px-4">
@@ -1189,7 +1261,7 @@ export function App() {
           onOverlayChange={setSceneOverlayEnabled}
         />
         {deliveryPending && <div className="rounded-xl border border-amber-400/60 bg-amber-950/70 px-4 py-3 shadow-lg" role="status">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-xs font-bold uppercase tracking-wider text-amber-300">Delivery package pending</p><p className="mt-1 text-sm text-amber-50">{deliveryDescription}</p><p className="mt-1 text-[10px] text-amber-200/70">This reminder remains until you confirm the package alert is complete.</p></div><button type="button" onClick={() => { setDeliveryPending(false); localStorage.removeItem('lookout_delivery_pending'); setLiveAlert('Delivery alert acknowledged.'); }} className="rounded-lg bg-amber-400 px-3 py-2 font-mono text-xs font-bold text-black hover:bg-amber-300">ACKNOWLEDGE DELIVERY</button></div>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-xs font-bold uppercase tracking-wider text-amber-300">Delivery package pending</p><p className="mt-1 text-sm text-amber-50">{deliveryDescription}</p><p className="mt-1 text-[10px] text-amber-200/70">This reminder remains until you confirm the package alert is complete.</p></div><button type="button" onClick={() => { setDeliveryPending(false); localStorage.removeItem('lookout_delivery_pending'); notifyAlert({ title: 'Delivery acknowledged', message: 'The delivery reminder was cleared.', severity: 'info', speak: false, playTone: false, captureGif: false, durationMs: 4000 }); }} className="rounded-lg bg-amber-400 px-3 py-2 font-mono text-xs font-bold text-black hover:bg-amber-300">ACKNOWLEDGE DELIVERY</button></div>
         </div>}
 
         {/* DVR CONTROLS & FAST ACTIONS BAR */}

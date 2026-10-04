@@ -18,6 +18,7 @@ class AudioEngine {
   }
 
   playAlertTone(type: AlertToneType, volume = 0.5): void {
+    if (typeof window === 'undefined') return;
     try {
       const ctx = this.getContext();
       const osc = ctx.createOscillator();
@@ -39,7 +40,7 @@ class AudioEngine {
   }
 
   speak(text: string, rate = 1, pitch = 1): void {
-    if (!('speechSynthesis' in window) || !text) return;
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || !text) return;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = rate; utterance.pitch = pitch;
     window.speechSynthesis.speak(utterance);

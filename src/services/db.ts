@@ -100,6 +100,9 @@ export const DEFAULT_ALERT_SETTINGS: AlertNotificationSettings = {
   ttsVoiceEnabled: true,
   ttsVoiceRate: 1.0,
   ttsVoicePitch: 1.0,
+  announceIdentityNames: true,
+  gifAlertPreviews: true,
+  bannerDurationSeconds: 8,
 };
 
 export const DEFAULT_PWA_SETTINGS: PWASettings = {

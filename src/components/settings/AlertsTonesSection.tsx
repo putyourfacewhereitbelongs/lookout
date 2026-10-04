@@ -14,9 +14,11 @@ import {
   CheckCircle,
   Radio,
   AlertTriangle,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { AlertNotificationSettings, AlertToneType, EmergencyContact } from '../../types';
 import { audioEngine } from '../../services/audioEngine';
+import { alertCenter } from '../../services/alertCenter';
 
 interface AlertsTonesSectionProps {
   settings: AlertNotificationSettings;
@@ -106,6 +108,19 @@ export const AlertsTonesSection: React.FC<AlertsTonesSectionProps> = ({
       settings.ttsVoicePitch
     );
     setTimeout(() => setIsTestingSpeech(false), 3500);
+  };
+
+  const handleTestFaceAlert = () => {
+    alertCenter.setSettings(settings);
+    alertCenter.push({
+      title: 'Test notification: Brian identified',
+      message: 'This is how a recognized face appears. The live feed stays visible behind the card.',
+      severity: 'info',
+      subjectName: 'Brian',
+      confidence: 0.97,
+      cameraName: 'Lookout test camera',
+      durationMs: Math.max(3, settings.bannerDurationSeconds) * 1000,
+    });
   };
 
   const handleRequestPushPermission = async () => {
@@ -490,6 +505,76 @@ export const AlertsTonesSection: React.FC<AlertsTonesSectionProps> = ({
             </button>
           </div>
         </div>
+      </div>
+
+      {/* SECTION 3B: FACE NOTIFICATION BEHAVIOUR */}
+      <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3 font-mono text-xs">
+        <div className="flex items-center gap-2">
+          <ImageIcon className="w-4 h-4 text-cyan-400" />
+          <h4 className="font-bold uppercase text-white">Face Notification Pop-ups</h4>
+        </div>
+        <p className="text-slate-400 text-[11px]">
+          Alerts appear as compact corner cards showing the detected face instead of covering the live feed. Each card can carry a short looping GIF of what the camera saw and speak the identity aloud.
+        </p>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="flex items-start justify-between gap-3 bg-slate-900 p-2.5 rounded-lg border border-slate-800 cursor-pointer">
+            <span>
+              <span className="font-bold text-slate-200 block">Animated GIF preview</span>
+              <span className="text-slate-500 text-[10px] block mt-0.5">
+                Encodes ~1.3 seconds of the live feed into a smooth looping GIF attached to the alert and saveable with one click.
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.gifAlertPreviews}
+              onChange={(e) => onChange({ ...settings, gifAlertPreviews: e.target.checked })}
+              className="mt-1 w-4 h-4 accent-cyan-500 shrink-0"
+            />
+          </label>
+
+          <label className="flex items-start justify-between gap-3 bg-slate-900 p-2.5 rounded-lg border border-slate-800 cursor-pointer">
+            <span>
+              <span className="font-bold text-slate-200 block">Speak the identified name</span>
+              <span className="text-slate-500 text-[10px] block mt-0.5">
+                Announces "Brian has been identified" aloud. Turn off to announce only "a known person has been identified".
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={settings.announceIdentityNames}
+              onChange={(e) => onChange({ ...settings, announceIdentityNames: e.target.checked })}
+              className="mt-1 w-4 h-4 accent-cyan-500 shrink-0"
+            />
+          </label>
+        </div>
+
+        <div className="bg-slate-900 p-2.5 rounded-lg border border-slate-800">
+          <div className="flex justify-between text-[11px] text-slate-300 mb-1">
+            <span>NOTIFICATION ON-SCREEN TIME</span>
+            <span className="text-cyan-400 font-bold">{settings.bannerDurationSeconds}s</span>
+          </div>
+          <input
+            type="range"
+            min="3"
+            max="30"
+            step="1"
+            value={settings.bannerDurationSeconds}
+            onChange={(e) => onChange({ ...settings, bannerDurationSeconds: parseInt(e.target.value, 10) })}
+            className="w-full accent-cyan-500 cursor-pointer"
+          />
+          <span className="text-[9px] text-slate-500 block mt-1">
+            Critical alerts stay up longer automatically. Hovering a card pauses its countdown.
+          </span>
+        </div>
+
+        <button
+          onClick={handleTestFaceAlert}
+          className="w-full py-2 bg-cyan-950 hover:bg-cyan-900 border border-cyan-700 text-cyan-300 font-bold rounded-lg transition flex items-center justify-center gap-1.5"
+        >
+          <Bell className="w-3.5 h-3.5" />
+          <span>SEND A TEST FACE NOTIFICATION</span>
+        </button>
       </div>
 
       {/* SECTION 4: EMERGENCY DISPATCH CONTACTS */}
