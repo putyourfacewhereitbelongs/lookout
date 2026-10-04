@@ -54,7 +54,14 @@ export const AudioCueOverlay: React.FC<{ cues: AudioVisualCue[]; enabled: boolea
           className={`flex items-center gap-2 rounded-lg border-2 px-3 py-2 text-xs font-bold shadow-xl backdrop-blur-sm ${STYLES[cue.type]}`}
         >
           {ICONS[cue.type]}
-          <span>{cue.label}</span>
+          <div className="flex min-w-0 flex-col">
+            <span>{cue.label}</span>
+            {cue.sourceLabel && (
+              <span className="font-mono text-[9px] font-normal uppercase tracking-wider opacity-75">
+                {cue.sourceLabel}
+              </span>
+            )}
+          </div>
           <span className="font-mono text-[10px] opacity-75">{cue.dbLevel.toFixed(0)} dB</span>
         </div>
       ))}

@@ -42,6 +42,7 @@ import {
   UIThemeMode,
   HistoryEvent,
   AudioVisualCue,
+  AudioCueSource,
 } from './types';
 
 import { StorageService } from './services/db';
@@ -67,7 +68,7 @@ import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
 import { narrateScene } from './services/sceneNarrator';
-import { audioCueService } from './services/audioCueService';
+import { audioCueService, captureElementAudio } from './services/audioCueService';
 import { AudioCueOverlay } from './components/AudioCueOverlay';
 import { CUE_SEVERITY } from './services/audioCueClassifier';
 import { AlertToastStack } from './components/AlertToastStack';
@@ -153,6 +154,12 @@ export function App() {
   // State: Detection & Telemetry
   const [detectedObjects, setDetectedObjects] = useState<DetectionObject[]>([]);
   const [audioCues, setAudioCues] = useState<AudioVisualCue[]>([]);
+  const [audioSourceNames, setAudioSourceNames] = useState<string[]>([]);
+  // Read inside the stream-setup effect so camera acquisition knows whether to
+  // ask for an audio track at all.
+  // Initialised from the saved setting so the very first camera acquisition
+  // on page load already knows whether to ask for an audio track.
+  const wantsAudioRef = useRef(accessibility.audioVisualCues);
   const streamStageRef = useRef<HTMLDivElement | null>(null);
   const [isRecordingNow, setIsRecordingNow] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -398,9 +405,13 @@ export function App() {
             : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
           let s: MediaStream;
           try {
+            // Capture camera audio only when the sound-cue feature is on, so
+            // the microphone is never opened for users who have not asked.
             s = await navigator.mediaDevices.getUserMedia({
               video,
-              audio: false,
+              audio: wantsAudioRef.current
+                ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+                : false,
             });
           } catch {
             // Preserve the camera feed on devices without an available microphone.
@@ -421,9 +432,11 @@ export function App() {
         }
       } else if (activeCamera.type === 'screen') {
         try {
+          // Requesting audio makes the browser offer the "share tab audio"
+          // checkbox, which is what feeds the acoustic classifier.
           const s = await navigator.mediaDevices.getDisplayMedia({
             video: isPhone ? { frameRate: { ideal: 30, max: 30 } } : { frameRate: { ideal: 60 } },
-            audio: false,
+            audio: wantsAudioRef.current,
           });
           currentStream = s;
           attachStream(s);
@@ -446,7 +459,7 @@ export function App() {
         currentStream.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [activeCamId, activeCamera, cameraRetryKey, isPhone]);
+  }, [activeCamId, activeCamera, cameraRetryKey, isPhone, accessibility.audioVisualCues]);
 
   // References for the lightweight render pipeline
   const detectedObjectsRef = useRef<DetectionObject[]>([]);
@@ -456,7 +469,11 @@ export function App() {
   const videoProcessingRef = useRef(videoProcessing);
   const accessibilityRef = useRef(accessibility);
 
+  const camerasRef = useRef(cameras);
+
   useEffect(() => { activeCameraRef.current = activeCamera; }, [activeCamera]);
+  useEffect(() => { camerasRef.current = cameras; }, [cameras]);
+  useEffect(() => { wantsAudioRef.current = accessibility.audioVisualCues; }, [accessibility.audioVisualCues]);
   useEffect(() => { nightVisionRef.current = nightVision; }, [nightVision]);
   useEffect(() => { redSilhouetteRef.current = redSilhouette; }, [redSilhouette]);
   useEffect(() => { videoProcessingRef.current = videoProcessing; }, [videoProcessing]);
@@ -872,14 +889,56 @@ export function App() {
       }
     });
 
-    void audioCueService.start(videoElementRef.current?.srcObject as MediaStream | null);
+    // Collect every audio-bearing source: the shared tab/screen or webcam
+    // attached to the active camera, any added camera that carries its own
+    // audio track, and network/demo feeds whose audio lives on the <video>
+    // element. The microphone is used only if none of those provide audio.
+    const collectSources = (): AudioCueSource[] => {
+      const sources: AudioCueSource[] = [];
+      const seen = new Set<MediaStream>();
+
+      const push = (id: string, label: string, stream: MediaStream | null | undefined) => {
+        if (!stream || seen.has(stream) || stream.getAudioTracks().length === 0) return;
+        seen.add(stream);
+        sources.push({ id, label, stream, owned: false });
+      };
+
+      const live = videoElementRef.current?.srcObject as MediaStream | null;
+      const active = activeCameraRef.current;
+      push(active?.id || 'active', active?.name || 'Active camera', live);
+
+      // Network, Wyze, and demo feeds play from a URL, so their audio is only
+      // reachable by capturing the media element itself.
+      if (!live) push(`${active?.id || 'active'}-element`, active?.name || 'Active camera', captureElementAudio(videoElementRef.current));
+
+      camerasRef.current.forEach((camera) => {
+        if (camera.stream) push(camera.id, camera.name, camera.stream);
+      });
+
+      return sources;
+    };
+
+    const syncSources = () => {
+      const sources = collectSources();
+      void audioCueService.start(sources, true).then(() => {
+        if (cancelled) return;
+        setAudioSourceNames(audioCueService.activeSources.map((source) => source.label));
+      });
+    };
+
+    syncSources();
+    // Re-scan periodically so a tab shared (or stopped) mid-session is picked
+    // up without the user having to toggle the setting.
+    const rescan = window.setInterval(syncSources, 4000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(rescan);
       unsubscribe();
       audioCueService.stop();
+      setAudioSourceNames([]);
     };
-  }, [accessibility.audioVisualCues, accessibility.voiceCommandsAndNarration, recordHistoryEvent, notifyAlert]);
+  }, [accessibility.audioVisualCues, accessibility.voiceCommandsAndNarration, activeCamId, recordHistoryEvent, notifyAlert]);
 
   // Recording Clock Timer
   useEffect(() => {
@@ -1503,6 +1562,7 @@ export function App() {
             accessibility={accessibility}
             onAccessibilityChange={setAccessibility}
             audioCues={audioCues}
+            audioSourceNames={audioSourceNames}
             emergencyContacts={emergencyContacts}
             onEmergencyContactsChange={setEmergencyContacts}
             detectionSensitivities={detectionSensitivities}

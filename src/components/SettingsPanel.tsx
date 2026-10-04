@@ -83,6 +83,7 @@ interface SettingsPanelProps {
   currentTheme: UIThemeMode;
   onThemeChange: (t: UIThemeMode) => void;
   audioCues?: AudioVisualCue[];
+  audioSourceNames?: string[];
   onClose?: () => void;
   initialTab?: SettingsTabId;
 }
@@ -171,6 +172,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   accessibility,
   onAccessibilityChange,
   audioCues = [],
+  audioSourceNames = [],
   emergencyContacts,
   onEmergencyContactsChange,
   detectionSensitivities,
@@ -395,6 +397,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             settings={accessibility}
             onChange={onAccessibilityChange}
             recentCues={audioCues}
+            audioSourceNames={audioSourceNames}
           />
         )}
 

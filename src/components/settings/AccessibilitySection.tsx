@@ -7,6 +7,8 @@ interface AccessibilitySectionProps {
   settings: AccessibilitySettings;
   onChange: (settings: AccessibilitySettings) => void;
   recentCues: AudioVisualCue[];
+  /** Labels of the audio sources currently being analysed. */
+  audioSourceNames?: string[];
 }
 
 const TOGGLES: Array<{
@@ -19,7 +21,7 @@ const TOGGLES: Array<{
     key: 'audioVisualCues',
     label: 'Audio-visual sound cues',
     description:
-      'Listens to the microphone and shows on-screen cues for glass breaking, alarms, impacts, barking, footsteps, and speech. Audio is analysed locally and never recorded or uploaded.',
+      'Listens to your shared tab or screen, any camera that carries audio, and the microphone as a fallback, then shows on-screen cues for glass breaking, alarms, impacts, barking, footsteps, and speech. Audio is analysed locally and never recorded or uploaded.',
     icon: <Ear className="h-4 w-4 text-cyan-400" />,
   },
   {
@@ -58,8 +60,13 @@ const CUE_STYLES: Record<AudioVisualCue['type'], string> = {
   status: 'border-slate-700 bg-slate-900 text-slate-400',
 };
 
-export const AccessibilitySection: React.FC<AccessibilitySectionProps> = ({ settings, onChange, recentCues }) => {
-  const [meter, setMeter] = useState<{ dbfs: number; label: string } | null>(null);
+export const AccessibilitySection: React.FC<AccessibilitySectionProps> = ({
+  settings,
+  onChange,
+  recentCues,
+  audioSourceNames = [],
+}) => {
+  const [meter, setMeter] = useState<{ dbfs: number; label: string; source: string } | null>(null);
 
   // Live input meter so the user can confirm the microphone is actually being
   // heard, rather than having to trust a silent toggle.
@@ -68,8 +75,15 @@ export const AccessibilitySection: React.FC<AccessibilitySectionProps> = ({ sett
       setMeter(null);
       return;
     }
-    return audioCueService.onLevel(({ dbfs, result }) => {
-      setMeter({ dbfs, label: result.type === 'status' ? 'ambient' : result.type });
+    // Show whichever source is currently loudest, so the meter reflects the
+    // feed the user is most likely watching.
+    let loudest = { dbfs: -Infinity, at: 0 };
+    return audioCueService.onLevel(({ dbfs, result, sourceLabel }) => {
+      const now = Date.now();
+      if (dbfs >= loudest.dbfs || now - loudest.at > 700) {
+        loudest = { dbfs, at: now };
+        setMeter({ dbfs, label: result.type === 'status' ? 'ambient' : result.type, source: sourceLabel });
+      }
     });
   }, [settings.audioVisualCues]);
 
@@ -118,6 +132,26 @@ export const AccessibilitySection: React.FC<AccessibilitySectionProps> = ({ sett
             </span>
           </div>
 
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">Listening to:</span>
+            {audioSourceNames.length === 0 ? (
+              <span className="font-mono text-[10px] text-amber-300">no audio source yet</span>
+            ) : (
+              audioSourceNames.map((name) => (
+                <span
+                  key={name}
+                  className={`rounded-full border px-2 py-0.5 font-mono text-[10px] ${
+                    meter?.source === name
+                      ? 'border-cyan-400/60 bg-cyan-950/50 text-cyan-200'
+                      : 'border-slate-700 bg-slate-900 text-slate-400'
+                  }`}
+                >
+                  {name}
+                </span>
+              ))
+            )}
+          </div>
+
           <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800">
             <div
               className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-amber-400 to-rose-500 transition-all duration-100"
@@ -144,6 +178,7 @@ export const AccessibilitySection: React.FC<AccessibilitySectionProps> = ({ sett
                   >
                     <span className="font-semibold">{cue.label}</span>
                     <span className="font-mono text-[10px] opacity-80">
+                      {cue.sourceLabel ? `${cue.sourceLabel} • ` : ''}
                       {new Date(cue.timestamp).toLocaleTimeString()} • {Math.round(cue.confidence * 100)}% • {cue.dbLevel.toFixed(0)} dBFS
                     </span>
                   </li>
