@@ -1,14 +1,10 @@
 // server.ts
 import express from "express";
-import { createServer } from "node:http";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "path";
 import os from "os";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
-import { WebSocketServer, WebSocket } from "ws";
 dotenv.config();
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path.dirname(__filename);
@@ -33,45 +29,7 @@ function getLocalNetworkIp() {
   }
   return "192.168.1.120";
 }
-var SYNC_TOKEN = process.env.LOOKOUT_SYNC_TOKEN?.trim() || "";
-var SYNC_STORAGE_KEY = process.env.LOOKOUT_SYNC_STORAGE_KEY?.trim() || "";
-var SYNC_STORAGE_PATH = process.env.LOOKOUT_SYNC_STORAGE_PATH || path.join(process.cwd(), ".lookout", "sync-state.enc");
-var syncClients = /* @__PURE__ */ new Set();
-function encryptionKey() {
-  const secret = SYNC_STORAGE_KEY || SYNC_TOKEN;
-  return secret ? createHash("sha256").update(secret).digest() : null;
-}
-function loadEncryptedSyncState() {
-  const key = encryptionKey();
-  if (!key || !existsSync(SYNC_STORAGE_PATH)) return null;
-  try {
-    const [ivText, tagText, encryptedText] = readFileSync(SYNC_STORAGE_PATH, "utf8").split(":");
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivText, "base64"));
-    decipher.setAuthTag(Buffer.from(tagText, "base64"));
-    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(encryptedText, "base64")), decipher.final()]).toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-function persistEncryptedSyncState(state) {
-  const key = encryptionKey();
-  if (!key) return;
-  try {
-    mkdirSync(path.dirname(SYNC_STORAGE_PATH), { recursive: true });
-    const iv = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const encrypted = Buffer.concat([cipher.update(JSON.stringify(state), "utf8"), cipher.final()]);
-    writeFileSync(SYNC_STORAGE_PATH, [iv.toString("base64"), cipher.getAuthTag().toString("base64"), encrypted.toString("base64")].join(":"), { mode: 384 });
-  } catch {
-  }
-}
-var sharedSyncStore = loadEncryptedSyncState();
-function broadcastSync(message, except) {
-  const encoded = JSON.stringify(message);
-  for (const client of syncClients) {
-    if (client !== except && client.readyState === WebSocket.OPEN) client.send(encoded);
-  }
-}
+var sharedSyncStore = null;
 var COMPREFACE_URL = (process.env.COMPREFACE_URL || "http://localhost:8000").replace(/\/+$/, "");
 var COMPREFACE_API_KEY = process.env.COMPREFACE_API_KEY?.trim() || "";
 var COMPREFACE_API_KEY_REQUIRED = "CompreFace API is not configured. Create a Face Recognition Service in CompreFace and set COMPREFACE_API_KEY.";
@@ -367,13 +325,7 @@ app.get("/api/stream/proxy", async (req, res) => {
     res.status(502).json({ error: "Proxy fetch failed", details: String(err) });
   }
 });
-function syncRequestAuthorized(req) {
-  if (!SYNC_TOKEN) return true;
-  const bearer = req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
-  return bearer === SYNC_TOKEN || req.query.token === SYNC_TOKEN;
-}
 app.post("/api/sync/push", (req, res) => {
-  if (!syncRequestAuthorized(req)) return res.status(401).json({ error: "Sync authentication required" });
   const { deviceId, payload } = req.body;
   if (!payload) {
     return res.status(400).json({ error: "Missing payload" });
@@ -383,12 +335,9 @@ app.post("/api/sync/push", (req, res) => {
     deviceId: deviceId || "anonymous_station",
     payload
   };
-  persistEncryptedSyncState(sharedSyncStore);
-  broadcastSync({ type: "state", ...sharedSyncStore });
   res.json({ success: true, timestamp: sharedSyncStore.timestamp });
 });
 app.get("/api/sync/pull", (req, res) => {
-  if (!syncRequestAuthorized(req)) return res.status(401).json({ error: "Sync authentication required" });
   if (!sharedSyncStore) {
     return res.json({ available: false });
   }
@@ -399,34 +348,10 @@ app.get("/api/sync/pull", (req, res) => {
     payload: sharedSyncStore.payload
   });
 });
-var httpServer = createServer(app);
-var syncWss = new WebSocketServer({ server: httpServer, path: "/ws" });
-syncWss.on("connection", (socket, request) => {
-  const token = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`).searchParams.get("token") || "";
-  if (SYNC_TOKEN && token !== SYNC_TOKEN) {
-    socket.close(1008, "Sync authentication required");
-    return;
-  }
-  syncClients.add(socket);
-  if (sharedSyncStore) socket.send(JSON.stringify({ type: "state", ...sharedSyncStore }));
-  socket.on("message", (raw) => {
-    try {
-      const message = JSON.parse(raw.toString());
-      if (message?.type !== "state" || typeof message.payload !== "string" || message.payload.length > 8e6) return;
-      sharedSyncStore = { timestamp: Date.now(), deviceId: String(message.deviceId || "portal"), payload: message.payload };
-      persistEncryptedSyncState(sharedSyncStore);
-      broadcastSync({ type: "state", ...sharedSyncStore }, socket);
-    } catch {
-      socket.close(1003, "Invalid sync message");
-    }
-  });
-  socket.on("close", () => syncClients.delete(socket));
-  socket.on("error", () => syncClients.delete(socket));
-});
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true, host: true, allowedHosts: true },
+      server: { middlewareMode: true },
       appType: "spa"
     });
     app.use(vite.middlewares);
@@ -437,7 +362,7 @@ async function startServer() {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`Lookout AI DVR Server running on http://0.0.0.0:${PORT}`);
   });
 }
