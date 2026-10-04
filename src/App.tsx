@@ -230,6 +230,16 @@ export function App() {
     const { captureGif = true, ...alert } = input;
     const id = alertCenter.push({ cameraName: activeCameraRef.current?.name, ...alert });
     if (!id) return null;
+
+    // Accessibility preferences apply to every raised alert.
+    const access = accessibilityRef.current;
+    if (access?.hapticFeedback && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(alert.severity === 'critical' ? [120, 60, 120, 60, 200] : alert.severity === 'warning' ? [90, 50, 90] : 60);
+    }
+    if (access?.voiceCommandsAndNarration && alert.speak !== false) {
+      audioEngine.speakSceneDescription(`${alert.title}. ${alert.message}`);
+    }
+
     const canvas = canvasRef.current;
     // Only one capture runs at a time so overlapping alerts cannot stack
     // several per-frame pixel reads on top of the live render loop.

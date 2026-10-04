@@ -127,6 +127,21 @@ export class VideoProcessor {
       this.applySuperResolutionSharpen(ctx, width, height);
     }
 
+    // Step 5: Video Background Erase — dim everything except tracked subjects.
+    if (videoProcessing.videoBackgroundErase) {
+      this.applyBackgroundErase(ctx, width, height, detections);
+    }
+
+    // Step 6: Red Silhouette — flood tracked people/animals with the alert colour.
+    if (redSilhouette.enabled) {
+      this.applyRedSilhouette(ctx, width, height, detections, redSilhouette);
+    }
+
+    // Step 7: Accessibility overlays (obstacle highlights, floor elevation).
+    if (accessibility.visuallyImpairedObstacleOverlay || accessibility.floorElevationSensor) {
+      this.applyAssistiveContours(ctx, width, height, detections, accessibility);
+    }
+
     // Render recognized people, animals, and objects.
     this.renderTrackingHUD(ctx, width, height, detections);
 
@@ -287,6 +302,86 @@ export class VideoProcessor {
     ctx.restore();
   }
 
+  // --- Red Silhouette: flood tracked subjects with the alert colour ---
+  private applyRedSilhouette(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    detections: DetectionObject[],
+    settings: RedSilhouetteSettings
+  ) {
+    const targets = detections.filter((d) =>
+      (d.category === 'person' && settings.targetPeople) ||
+      (d.category === 'animal' && settings.targetAnimals)
+    );
+    if (targets.length === 0) return;
+
+    const opacity = Math.max(0.1, Math.min(1, settings.opacity ?? 0.7));
+    // Edge precision drives how closely the fill hugs the subject: a low value
+    // is a soft blob, a high value is a tighter, harder-edged cutout.
+    const precision = Math.max(1, Math.min(5, settings.edgePrecision ?? 3));
+    const tightness = 0.42 + precision * 0.028;
+    const feather = (6 - precision) * 0.09;
+
+    ctx.save();
+    targets.forEach((d) => {
+      const [bx, by, bw, bh] = d.bbox;
+      const px = bx * width;
+      const py = by * height;
+      const pw = bw * width;
+      const ph = bh * height;
+      const cx = px + pw / 2;
+      const cy = py + ph / 2;
+      const rx = pw * tightness;
+      const ry = ph * tightness;
+
+      const color = d.silhouetteColor || '#ef4444';
+      ctx.globalCompositeOperation = 'source-atop';
+
+      if (feather > 0.01) {
+        const gradient = ctx.createRadialGradient(cx, cy, Math.min(rx, ry) * (1 - feather), cx, cy, Math.max(rx, ry));
+        gradient.addColorStop(0, this.withAlpha(color, opacity));
+        gradient.addColorStop(1, this.withAlpha(color, 0));
+        ctx.fillStyle = gradient;
+      } else {
+        ctx.fillStyle = this.withAlpha(color, opacity);
+      }
+
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Hard outline keeps the subject readable at high edge precision.
+      if (precision >= 4) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = this.withAlpha(color, Math.min(1, opacity + 0.2));
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalCompositeOperation = 'source-atop';
+      }
+    });
+    ctx.restore();
+  }
+
+  /** Convert a hex or rgb colour into an rgba() string at the given alpha. */
+  private withAlpha(color: string, alpha: number): string {
+    const clamped = Math.max(0, Math.min(1, alpha));
+    const hex = color.trim();
+    const match = /^#?([0-9a-f]{6})$/i.exec(hex);
+    if (match) {
+      const value = parseInt(match[1], 16);
+      return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${clamped})`;
+    }
+    const short = /^#?([0-9a-f]{3})$/i.exec(hex);
+    if (short) {
+      const [r, g, b] = short[1].split('').map((c) => parseInt(c + c, 16));
+      return `rgba(${r}, ${g}, ${b}, ${clamped})`;
+    }
+    return `rgba(239, 68, 68, ${clamped})`;
+  }
+
   // --- Video Background Erase ---
   private applyBackgroundErase(
     ctx: CanvasRenderingContext2D,
@@ -433,18 +528,43 @@ export class VideoProcessor {
         }
       }
 
-      ctx.font = 'bold 12px sans-serif';
-      const labelWidth = Math.min(width - 4, Math.max(ctx.measureText(label).width + 16, 96));
-      const labelX = Math.max(0, Math.min(width - labelWidth, x));
-      const labelHeight = 24;
-      const labelY = y >= labelHeight + 2 ? y - labelHeight - 2 : Math.min(height - labelHeight, y + h + 4);
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.84)';
+      // Name plate. The font scales with the canvas so the recognized name stays
+      // legible on a phone screen and on a 4K wall display, and the text is
+      // drawn in white over an opaque plate with a dark outline so it never
+      // disappears into a bright or busy background.
+      const fontSize = Math.round(Math.max(16, Math.min(34, width * 0.022)));
+      ctx.font = `900 ${fontSize}px "Segoe UI", system-ui, sans-serif`;
+      ctx.textBaseline = 'middle';
+
+      const padX = Math.round(fontSize * 0.6);
+      const labelHeight = Math.round(fontSize * 1.75);
+      const textWidth = ctx.measureText(label).width;
+      const labelWidth = Math.min(width - 4, Math.max(textWidth + padX * 2, fontSize * 5));
+      const labelX = Math.max(2, Math.min(width - labelWidth - 2, x));
+      const labelY = y >= labelHeight + 6 ? y - labelHeight - 6 : Math.min(height - labelHeight - 2, y + h + 6);
+      const textY = labelY + labelHeight / 2;
+
+      // Opaque plate with a thick accent bar on the left edge.
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.92)';
       ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(labelX, labelY, labelWidth, labelHeight);
       ctx.fillStyle = color;
-      ctx.fillText(label, labelX + 8, labelY + 16, labelWidth - 14);
+      ctx.fillRect(labelX, labelY, Math.max(4, Math.round(fontSize * 0.22)), labelHeight);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(labelX, labelY, labelWidth, labelHeight);
+
+      // White text with a dark halo: maximum contrast on any footage.
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      ctx.lineWidth = Math.max(3, fontSize * 0.22);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.95)';
+      ctx.strokeText(label, labelX + padX, textY, labelWidth - padX * 1.5);
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+      ctx.shadowBlur = 4;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(label, labelX + padX, textY, labelWidth - padX * 1.5);
+      ctx.shadowBlur = 0;
+      ctx.textBaseline = 'alphabetic';
     });
     ctx.restore();
   }
