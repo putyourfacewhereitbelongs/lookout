@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Shield,
   Eye,
@@ -65,6 +65,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
+import { narrateScene } from './services/sceneNarrator';
 import { AlertToastStack } from './components/AlertToastStack';
 import { motion } from 'motion/react';
 
@@ -827,29 +828,21 @@ export function App() {
     return () => clearInterval(interval);
   }, [isRecordingNow]);
 
-  const buildSceneDescription = () => {
-    const visibleSubjects = detectedObjects
-      .map((object) => object.subjectName || object.nameTag || object.label)
-      .filter(Boolean)
-      .filter((value, index, values) => values.indexOf(value) === index)
-      .slice(0, 8);
-    const people = detectedObjects.filter((object) => object.category === 'person');
-    const animals = detectedObjects.filter((object) => object.category === 'animal');
-    const packageObject = detectedObjects.find((object) => /package|parcel|box|delivery/i.test(object.label));
-    if (packageObject) return `${activeCamera.name}: a package or delivery is visible at the monitored entry area`;
-    if (people.length > 1) {
-      const names = people.map((person) => person.subjectName || 'an unidentified person');
-      return `${activeCamera.name}: ${names[0]} appears to be talking with ${names.slice(1).join(' and ')}`;
-    }
-    if (people[0]?.subjectName) return `${activeCamera.name}: ${people[0].subjectName} is ${people[0].posture || 'present'} in the yard or driveway scene`;
-    if (people.length) return `${activeCamera.name}: a person is ${people[0].posture || 'moving'} through the monitored yard or driveway`;
-    if (animals.length) return `${activeCamera.name}: ${animals.map((animal) => animal.subjectName || animal.label).join(' and ')} ${animals[0].posture || 'is visible'} in the scene`;
-    return visibleSubjects.length > 0
-      ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
-      : `${activeCamera.name}: no active subjects; live camera scene is clear`;
-  };
+  // Rich narration of what is actually on screen and who, derived from every
+  // attribute the recognition pipeline attaches to a detection.
+  const sceneNarration = useMemo(
+    () =>
+      narrateScene(detectedObjects, {
+        cameraName: activeCamera.name,
+        faceProfiles,
+        nightVisionEnabled: nightVision.enabled,
+      }),
+    [detectedObjects, activeCamera.name, faceProfiles, nightVision.enabled],
+  );
 
-  const liveSceneDetails = buildSceneDescription();
+  const buildSceneDescription = () => sceneNarration.detailed;
+
+  const liveSceneDetails = sceneNarration.summary;
 
   // Handle Recording Toggle (captures the lightweight 30 FPS display stream)
   const handleToggleRecord = () => {
@@ -1256,6 +1249,7 @@ export function App() {
 
         <SceneDetailsPanel
           details={liveSceneDetails}
+          narration={sceneNarration}
           detections={detectedObjects}
           overlayEnabled={sceneOverlayEnabled}
           onOverlayChange={setSceneOverlayEnabled}
