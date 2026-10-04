@@ -41,6 +41,7 @@ import {
   StoragePreferences,
   UIThemeMode,
   HistoryEvent,
+  AudioVisualCue,
 } from './types';
 
 import { StorageService } from './services/db';
@@ -66,6 +67,9 @@ import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
 import { narrateScene } from './services/sceneNarrator';
+import { audioCueService } from './services/audioCueService';
+import { AudioCueOverlay } from './components/AudioCueOverlay';
+import { CUE_SEVERITY } from './services/audioCueClassifier';
 import { AlertToastStack } from './components/AlertToastStack';
 import { motion } from 'motion/react';
 
@@ -148,6 +152,7 @@ export function App() {
 
   // State: Detection & Telemetry
   const [detectedObjects, setDetectedObjects] = useState<DetectionObject[]>([]);
+  const [audioCues, setAudioCues] = useState<AudioVisualCue[]>([]);
   const streamStageRef = useRef<HTMLDivElement | null>(null);
   const [isRecordingNow, setIsRecordingNow] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -825,6 +830,57 @@ export function App() {
     };
   }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, notifyAlert, isPhone]);
 
+  // --- Audio-visual sound cues -------------------------------------------
+  // Microphone capture runs only while the accessibility setting is enabled,
+  // and is torn down the moment it is switched off.
+  useEffect(() => {
+    if (!accessibility.audioVisualCues) {
+      audioCueService.stop();
+      return;
+    }
+
+    let cancelled = false;
+    const unsubscribe = audioCueService.onCue((cue) => {
+      if (cancelled) return;
+      setAudioCues((prev) => [cue, ...prev].slice(0, 40));
+
+      const severity = CUE_SEVERITY[cue.type];
+      recordHistoryEvent(
+        {
+          type: 'scene_alert',
+          title: cue.label,
+          details: `Detected acoustically at ${cue.dbLevel.toFixed(0)} dBFS with ${Math.round(cue.confidence * 100)}% confidence.`,
+          severity,
+          confidence: cue.confidence,
+        },
+        `audio-cue-${cue.type}`,
+        8000,
+      );
+
+      // Only the genuinely urgent classes raise a toast; speech and footsteps
+      // would otherwise fire constantly in a busy space.
+      if (severity === 'critical' || cue.type === 'impact') {
+        notifyAlert({
+          title: cue.label,
+          message: `Sound detected on ${activeCameraRef.current?.name || 'the active camera'} at ${cue.dbLevel.toFixed(0)} dBFS.`,
+          severity,
+          speak: accessibility.voiceCommandsAndNarration,
+          playTone: true,
+          captureGif: false,
+          durationMs: 7000,
+        });
+      }
+    });
+
+    void audioCueService.start(videoElementRef.current?.srcObject as MediaStream | null);
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      audioCueService.stop();
+    };
+  }, [accessibility.audioVisualCues, accessibility.voiceCommandsAndNarration, recordHistoryEvent, notifyAlert]);
+
   // Recording Clock Timer
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -1254,6 +1310,7 @@ export function App() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
+          <AudioCueOverlay cues={audioCues} enabled={accessibility.audioVisualCues} />
           <SceneCaptionOverlay details={liveSceneDetails} enabled={sceneOverlayEnabled} />
         </motion.div>
 
@@ -1445,6 +1502,7 @@ export function App() {
             onVideoProcessingChange={setVideoProcessing}
             accessibility={accessibility}
             onAccessibilityChange={setAccessibility}
+            audioCues={audioCues}
             emergencyContacts={emergencyContacts}
             onEmergencyContactsChange={setEmergencyContacts}
             detectionSensitivities={detectionSensitivities}
