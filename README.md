@@ -106,6 +106,23 @@ Hovering a card pauses its countdown, `Esc` clears the stack, and repeated sight
 | Quiet hours | Keep the cards visible while muting tones and speech |
 | Send a test face notification | Preview exactly how an identification looks and sounds |
 
+## Detection sensitivities
+
+**Settings -> AI Detection Sensitivities** drives the live pipeline directly. Nothing in that panel is decorative:
+
+| Control | Effect |
+| --- | --- |
+| People & Intruders | Master gate for the face pipeline: detection confidence floor, monitored zone, consecutive-scan confirmation, identity/unknown-person alerts, and the face-triggered DVR |
+| Threats & Perimeter Breach | Gates intruder-identification and rapid-approach alerts |
+| Animals & Pets | Gates local pet recognition and its alerts |
+| Vehicles / Objects | No detector of these kinds is bundled; the switches gate the delivery-activity notifier for vehicle- and package-like labels |
+| Weather | Reserved; no bundled detector |
+| Fixed camera false-positive guard | Pauses detections briefly when most of the image shifts together (fixed cameras only) |
+
+The detection sensitivity slider maps to how many consecutive scans must confirm a face (one scan at 100%, six at the lowest setting), and the confidence slider raises the detector probability floor above the built-in 82% false-positive guard. Each category also owns its alert switch, audible chime, monitored zone, and HUD bounding-box color, and the panel shows the derived values live.
+
+The **Face Database similarity match threshold** (85–99%) is honored across its full range: on-screen naming uses the exact value, and alert-level identification always requires a little more than it.
+
 ## Low-CPU recognition mode
 
 Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends a compact 640-pixel JPEG to CompreFace one request at a time and renders overlays at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.

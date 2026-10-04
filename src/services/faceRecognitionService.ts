@@ -1,5 +1,6 @@
-import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
+import { BodyLandmark, BodyPosture, CompreFaceDetection, CompreFaceSubject, DetectionObject } from '../types';
 import { filterImplausibleFaces } from './faceDetectionGate';
+import { conservativeIdentityThreshold, identityThreshold } from './detectionSettings';
 
 // A face should disappear quickly after the detector loses it. Keeping a
 // person alive for multiple seconds is a common source of "ghost" sightings.
@@ -27,6 +28,20 @@ function clamp(value: number, min: number, max: number) {
 
 function topSimilarity(detection: CompreFaceDetection): number {
   return Math.max(0, ...(detection.subjects || []).map((subject) => subject.similarity));
+}
+
+/**
+ * Subjects sorted strongest-first. CompreFace normally returns them in this
+ * order, but nothing guarantees it, and announcing `subjects[0]` verbatim has
+ * produced wrong-name alerts when it was not.
+ */
+export function rankedSubjects(detection: CompreFaceDetection): CompreFaceSubject[] {
+  return [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
+}
+
+/** The single strongest enrolled-subject match for a detection, if any. */
+export function topSubjectOf(detection: CompreFaceDetection): CompreFaceSubject | null {
+  return rankedSubjects(detection)[0] || null;
 }
 
 function boxArea(detection: CompreFaceDetection): number {
@@ -346,19 +361,22 @@ export class FaceRecognitionService {
   }
 
   isReliableMatch(detection: CompreFaceDetection, threshold: number): boolean {
-    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    // Honor the "Sensitive" setting while keeping a meaningful floor and a
-    // clear lead over the next enrolled identity. This is especially important
-    // for small distant faces whose embedding score is naturally lower.
-    const requiredSimilarity = Math.max(0.85, Math.min(0.99, threshold));
+    const [best, runnerUp] = rankedSubjects(detection);
+    // The Face Database similarity slider is honored across its full range
+    // while a clear lead over the next enrolled identity is still required.
+    // This is especially important for small distant faces whose embedding
+    // score is naturally lower.
+    const requiredSimilarity = identityThreshold(threshold);
     return Boolean(best && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
   }
 
   /** Stricter gate used before a name can trigger an alert or DVR event. */
   isConservativeMatch(detection: CompreFaceDetection, threshold: number): boolean {
-    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    const requiredSimilarity = Math.max(0.96, Math.min(0.995, threshold));
+    const [best, runnerUp] = rankedSubjects(detection);
+    // Always one step stricter than the naming threshold, so an announced
+    // identity never rests on the exact score that merely labeled the HUD.
+    const requiredSimilarity = conservativeIdentityThreshold(threshold);
     return Boolean(best && detection.box.probability >= 0.70 && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.10));
   }

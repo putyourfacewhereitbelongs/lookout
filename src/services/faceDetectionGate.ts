@@ -142,12 +142,26 @@ export class FacePresenceTracker {
 
   constructor(
     /** Consecutive scans a new face must appear in before being reported. */
-    private readonly framesToConfirm = 3,
+    private framesToConfirm = 3,
     /** Scans a confirmed face may be missing before it is dropped. */
-    private readonly framesToDrop = 3,
+    private framesToDrop = 3,
     /** Association radius as a fraction of the face's own size. */
     private readonly associationFactor = 1.4,
   ) {}
+
+  /**
+   * Re-tune the confirmation strictness while running. The People sensitivity
+   * slider maps onto framesToConfirm, so raising or lowering the setting takes
+   * effect on the next scan instead of requiring a tracker restart.
+   */
+  configure(options: { framesToConfirm?: number; framesToDrop?: number }): void {
+    if (Number.isFinite(options?.framesToConfirm)) {
+      this.framesToConfirm = Math.max(1, Math.round(options.framesToConfirm as number));
+    }
+    if (Number.isFinite(options?.framesToDrop)) {
+      this.framesToDrop = Math.max(1, Math.round(options.framesToDrop as number));
+    }
+  }
 
   reset(): void {
     this.candidates = [];
@@ -196,8 +210,13 @@ export class FacePresenceTracker {
         if (track.confirmed) confirmed.push(detection);
         else pendingCount++;
       } else {
-        this.candidates.push({ cx, cy, size, hits: 1, misses: 0, confirmed: false, lastSeen: now });
-        pendingCount++;
+        // A brand-new track can confirm immediately when the configured
+        // strictness is a single scan (maximum sensitivity).
+        const candidate: TrackedCandidate = { cx, cy, size, hits: 1, misses: 0, confirmed: false, lastSeen: now };
+        if (candidate.hits >= this.framesToConfirm) candidate.confirmed = true;
+        this.candidates.push(candidate);
+        if (candidate.confirmed) confirmed.push(detection);
+        else pendingCount++;
       }
     });
 

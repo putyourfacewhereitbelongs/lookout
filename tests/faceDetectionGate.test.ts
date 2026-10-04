@@ -176,3 +176,26 @@ test('end to end: a noisy empty scene produces no face presence', () => {
 
   assert.equal(everPresent, false, 'an empty scene must never announce a face');
 });
+
+// --- runtime reconfiguration ------------------------------------------------
+
+test('configure() retunes confirmation strictness on the next scan', () => {
+  const tracker = new FacePresenceTracker();
+  const face = box(100, 100, 80);
+  let result = tracker.update([face]);
+  assert.equal(result.facePresent, false);
+
+  // Low sensitivity now demands four agreeing scans.
+  tracker.configure({ framesToConfirm: 4 });
+  result = tracker.update([face]);
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, false, 'three scans must not confirm when four are required');
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, true, 'the fourth scan confirms');
+
+  // High sensitivity confirms a new track on the very next scan.
+  tracker.reset();
+  tracker.configure({ framesToConfirm: 1 });
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, true);
+});

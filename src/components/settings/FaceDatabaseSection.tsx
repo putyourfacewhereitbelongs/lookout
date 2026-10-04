@@ -403,6 +403,8 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
           </div>
           <p className="text-[10px] text-slate-400">
             Minimum visual embedding similarity required to confirm a face matches a known profile.
+            Applies live across the whole range: on-screen naming uses this value directly, while
+            alerts and DVR events always ask for slightly more.
           </p>
           <input
             type="range"

@@ -5,6 +5,7 @@ import {
   mapDetectionFromTile,
   mergeFaceDetections,
   shouldRunLongRangeTiles,
+  topSubjectOf,
 } from '../src/services/faceRecognitionService';
 import type { CompreFaceDetection, DetectionObject } from '../src/types';
 
@@ -148,4 +149,44 @@ test('preserves non-person objects while matching face detections', () => {
   const objects = service.correlateDetections(existing, [detection()], 400, 400, 0.92);
   assert.equal(objects.some((object) => object.id === 'car-1'), true);
   assert.equal(objects.filter((object) => object.category === 'person').length, 1);
+});
+
+// --- settings-driven identity gating ---------------------------------------
+
+test('a borderline identity needs the alert margin above the naming threshold', () => {
+  const borderline = detection([{ subject: 'Alex', similarity: 0.94 }]);
+  // Naming at the default 92% slider succeeds...
+  assert.equal(service.isReliableMatch(borderline, 0.92), true);
+  // ...but the conservative gate asks for more before alerting.
+  assert.equal(service.isConservativeMatch(borderline, 0.92), false);
+});
+
+test('the conservative gate follows the similarity slider down to its floor', () => {
+  const weak = detection([{ subject: 'Alex', similarity: 0.9 }]);
+  assert.equal(service.isConservativeMatch(weak, 0.85), true);
+  assert.equal(service.isConservativeMatch(weak, 0.92), false);
+  const strong = detection([{ subject: 'Alex', similarity: 0.98 }]);
+  assert.equal(service.isConservativeMatch(strong, 0.92), true);
+});
+
+test('the conservative gate still rejects ambiguous runner-up scores and weak boxes', () => {
+  const ambiguous = detection([
+    { subject: 'Alex', similarity: 0.98 },
+    { subject: 'Alec', similarity: 0.93 },
+  ]);
+  assert.equal(service.isConservativeMatch(ambiguous, 0.92), false);
+  const weakBox = {
+    ...detection([{ subject: 'Alex', similarity: 0.98 }]),
+    box: { probability: 0.5, x_min: 100, y_min: 80, x_max: 300, y_max: 280 },
+  };
+  assert.equal(service.isConservativeMatch(weakBox, 0.92), false);
+});
+
+test('the top subject is ranked by similarity, not by list order', () => {
+  const shuffled = detection([
+    { subject: 'Alec', similarity: 0.91 },
+    { subject: 'Alex', similarity: 0.97 },
+  ]);
+  assert.equal(topSubjectOf(shuffled)?.subject, 'Alex');
+  assert.equal(topSubjectOf(detection()), null);
 });

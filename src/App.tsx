@@ -26,6 +26,7 @@ import {
 
 import {
   CameraSource,
+  CompreFaceDetection,
   DetectionObject,
   NightVisionSettings,
   RedSilhouetteSettings,
@@ -48,13 +49,22 @@ import {
 import { StorageService } from './services/db';
 import { audioEngine } from './services/audioEngine';
 import { videoProcessor } from './services/videoProcessor';
-import { faceRecognitionService } from './services/faceRecognitionService';
+import { faceRecognitionService, topSubjectOf } from './services/faceRecognitionService';
 import { liveSyncService } from './services/liveSyncService';
-import { petRecognitionService } from './services/petRecognitionService';
+import { petRecognitionService, PetMatchConfirmer } from './services/petRecognitionService';
 import { isGlobalCameraMotion } from './services/cameraMotionGuard';
 import { alertCenter, PushAlertInput } from './services/alertCenter';
 import { captureCanvasGif } from './services/gifEncoder';
 import { createFaceThumbnail } from './services/faceThumbnail';
+import {
+  confirmationScans,
+  deliveryLabelAllowed,
+  detectionCenter,
+  detectionPassesCategory,
+  identityThreshold,
+  petMatchThreshold,
+  unknownFaceAlertKey,
+} from './services/detectionSettings';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { QRCodeModal } from './components/QRCodeModal';
@@ -175,7 +185,6 @@ export function App() {
   const autoFaceRecordingRef = useRef(false);
   const lastFaceSeenAtRef = useRef(0);
   const lastLongRangeScanAtRef = useRef(0);
-  const lastFaceAlertAtRef = useRef(0);
   const activeCamera = cameras.find((c) => c.id === activeCamId) || cameras[0];
   const eventCooldownsRef = useRef<Map<string, number>>(new Map());
   const faceApproachRef = useRef<Map<string, { baseHeight: number; maxHeight: number; lastSeen: number; approachLogged: boolean }>>(new Map());
@@ -316,7 +325,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const deliverySubject = detectedObjects.find((object) => /(?:ups|u\.?s\.?ps|fed.?ex|amazon|usps|postal|mail|delivery|courier|package|parcel|box|truck|van)/i.test(`${object.label} ${object.nameTag || ''}`));
+    // The delivery notifier follows the Vehicles and Objects category switches:
+    // vehicle-like labels need the cars category, package-like labels the objects category.
+    const deliverySubject = detectedObjects.find((object) => deliveryLabelAllowed(`${object.label} ${object.nameTag || ''}`, detectionSensitivities));
     if (!deliverySubject || deliveryPending) return;
     const description = /package|parcel|box/i.test(deliverySubject.label)
       ? 'Package activity detected; it may have been placed outside the current camera view.'
@@ -333,7 +344,7 @@ export function App() {
       cooldownMs: 120_000,
       speech: 'Delivery activity detected. A package may have been left outside the camera view.',
     });
-  }, [detectedObjects, deliveryPending, notifyAlert]);
+  }, [detectedObjects, deliveryPending, notifyAlert, detectionSensitivities]);
 
   // Save changes to local database
   useEffect(() => {
@@ -469,11 +480,16 @@ export function App() {
   const redSilhouetteRef = useRef(redSilhouette);
   const videoProcessingRef = useRef(videoProcessing);
   const accessibilityRef = useRef(accessibility);
+  const detectionSensitivitiesRef = useRef(detectionSensitivities);
+  const storagePreferencesRef = useRef(storagePreferences);
 
   const camerasRef = useRef(cameras);
   // Confirms a face across consecutive recognition scans before the app
   // reacts to it, which is what prevents empty-scene "face detected" alerts.
   const facePresenceRef = useRef(new FacePresenceTracker());
+  // A local pet-photo match may only name a subject after a second agreeing
+  // scan; a single weak colour-signature hit used to announce people as pets.
+  const petConfirmerRef = useRef(new PetMatchConfirmer());
 
   useEffect(() => { activeCameraRef.current = activeCamera; }, [activeCamera]);
   useEffect(() => { camerasRef.current = cameras; }, [cameras]);
@@ -482,6 +498,8 @@ export function App() {
   useEffect(() => { redSilhouetteRef.current = redSilhouette; }, [redSilhouette]);
   useEffect(() => { videoProcessingRef.current = videoProcessing; }, [videoProcessing]);
   useEffect(() => { accessibilityRef.current = accessibility; }, [accessibility]);
+  useEffect(() => { detectionSensitivitiesRef.current = detectionSensitivities; }, [detectionSensitivities]);
+  useEffect(() => { storagePreferencesRef.current = storagePreferences; }, [storagePreferences]);
 
   // Run the 30 FPS render and tracking pipeline on canvas
   useEffect(() => {
@@ -516,7 +534,8 @@ export function App() {
         nightVisionRef.current,
         redSilhouetteRef.current,
         videoProcessingRef.current,
-        accessibilityRef.current
+        accessibilityRef.current,
+        detectionSensitivitiesRef.current
       );
 
       // Display FPS counter update
@@ -546,41 +565,47 @@ export function App() {
 
   const syncFaceTriggeredDvr = (faceDetected: boolean) => {
     const now = Date.now();
+    const peopleSettings = detectionSensitivitiesRef.current.people;
     if (faceDetected) {
       lastFaceSeenAtRef.current = now;
       if (!autoFaceRecordingRef.current && (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive')) {
         document.getElementById('record-toggle-btn')?.click();
         autoFaceRecordingRef.current = true;
-        audioEngine.playAlertTone('perimeter_horn', 1);
-      }
-      if (now - lastFaceAlertAtRef.current > 3500) {
-        lastFaceAlertAtRef.current = now;
-        notifyAlert({
-          title: 'Face detected',
-          message: 'A face entered the scene and DVR recording started automatically.',
-          severity: 'info',
-          dedupeKey: 'dvr-face-start',
-          cooldownMs: 20_000,
-          playTone: false,
-          speak: false,
-          durationMs: 5000,
-        });
+        // Announce only at the moment recording actually starts: a face that
+        // stays in view must not re-toast every cooldown window. The chime
+        // goes through the alert settings instead of bypassing the configured
+        // volume and quiet hours.
+        if (peopleSettings.enabled && peopleSettings.triggerAlert) {
+          notifyAlert({
+            title: 'Face detected',
+            message: 'A face entered the scene and DVR recording started automatically.',
+            severity: 'info',
+            tone: 'perimeter_horn',
+            dedupeKey: 'dvr-face-start',
+            cooldownMs: 20_000,
+            playTone: peopleSettings.audibleChime,
+            speak: false,
+            durationMs: 5000,
+          });
+        }
       }
     } else if (autoFaceRecordingRef.current && now - lastFaceSeenAtRef.current > 2400) {
       document.getElementById('record-toggle-btn')?.click();
       autoFaceRecordingRef.current = false;
-      audioEngine.playAlertTone('radar_ping', 1);
-      notifyAlert({
-        title: 'Scene clear',
-        message: 'The face left the view and the DVR clip is being saved.',
-        severity: 'info',
-        dedupeKey: 'dvr-face-end',
-        cooldownMs: 20_000,
-        playTone: false,
-        speak: false,
-        durationMs: 4000,
-        captureGif: false,
-      });
+      if (peopleSettings.enabled && peopleSettings.triggerAlert) {
+        notifyAlert({
+          title: 'Scene clear',
+          message: 'The face left the view and the DVR clip is being saved.',
+          severity: 'info',
+          tone: 'radar_ping',
+          dedupeKey: 'dvr-face-end',
+          cooldownMs: 20_000,
+          playTone: peopleSettings.audibleChime,
+          speak: false,
+          durationMs: 4000,
+          captureGif: false,
+        });
+      }
     }
   };
 
@@ -592,11 +617,30 @@ export function App() {
     let timer: any = null;
     // Switching cameras must not inherit the previous view's confirmations.
     facePresenceRef.current.reset();
+    petConfirmerRef.current.reset();
 
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
       if (!storagePreferences.facialRecognitionMasterEnabled) {
         timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 800 : 400);
+        return;
+      }
+
+      // The People and Animals categories are the master gates of the face
+      // pipeline. With both switched off there is nothing to look for: no
+      // recognition request is sent and existing face tracks drop immediately.
+      const sensitivities = detectionSensitivitiesRef.current;
+      const peopleSettings = sensitivities.people;
+      const animalsSettings = sensitivities.animals;
+      if (!peopleSettings.enabled && !animalsSettings.enabled) {
+        facePresenceRef.current.reset();
+        petConfirmerRef.current.reset();
+        if (detectedObjectsRef.current.some((object) => object.category === 'person' || object.category === 'animal')) {
+          detectedObjectsRef.current = detectedObjectsRef.current.filter((object) => object.category !== 'person' && object.category !== 'animal');
+          setDetectedObjects([...detectedObjectsRef.current]);
+        }
+        syncFaceTriggeredDvr(false);
+        if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 800 : 400);
         return;
       }
 
@@ -652,46 +696,85 @@ export function App() {
         // Borderline identities get a second independent inference on the same
         // high-resolution frame. A name survives only when both checks agree;
         // a disagreement becomes an unknown face instead of a false alert.
-        const needsSecondCheck = detections.some((detection) => (detection.subjects?.[0]?.similarity || 0) < 0.96 && (detection.subjects?.length || 0) > 0);
+        const needsSecondCheck = detections.some((detection) => {
+          const top = topSubjectOf(detection);
+          return Boolean(top && top.similarity < 0.96);
+        });
         if (needsSecondCheck) {
           const secondPass = await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
           detections = detections.map((detection) => {
-            const firstSubject = detection.subjects?.[0];
+            const firstSubject = topSubjectOf(detection);
             if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
             const corroborating = secondPass.find((candidate) => {
-              const secondSubject = candidate.subjects?.[0];
+              const secondSubject = topSubjectOf(candidate);
               const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
               const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
               return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < 90;
             });
-            return corroborating ? { ...detection, subjects: [corroborating.subjects![0]] } : { ...detection, subjects: [] };
+            const corroboratingSubject = topSubjectOf(corroborating);
+            return corroboratingSubject ? { ...detection, subjects: [corroboratingSubject] } : { ...detection, subjects: [] };
           });
         }
+        // Each sensitivity gate is applied per detection before anything can
+        // react: the People category owns the person pipeline, the Animals
+        // category owns local pet recognition, and each has its own confidence
+        // floor and monitored zone.
+        const inPeoplePipeline = (d: CompreFaceDetection) =>
+          peopleSettings.enabled && detectionPassesCategory(d, snapW, snapH, peopleSettings);
+        const inAnimalPipeline = (d: CompreFaceDetection) =>
+          animalsSettings.enabled && detectionPassesCategory(d, snapW, snapH, animalsSettings);
+        const animalNames = StorageService.getFaceProfiles()
+          .filter((profile) => profile.subjectType === 'animal')
+          .map((profile) => profile.name);
+        const isCompreFaceAnimal = (d: CompreFaceDetection) => {
+          const top = topSubjectOf(d);
+          return Boolean(top && animalNames.some((name) => name.toLowerCase() === top.subject.toLowerCase()));
+        };
+
         // A real person appears in consecutive scans at a consistent place;
         // detector pareidolia on foliage, wood grain, or sensor noise flickers
-        // in and out. Only confirmed faces may drive alerts, DVR, or tracking.
-        const presence = facePresenceRef.current.update(detections);
+        // in and out. Only confirmed faces may drive alerts, DVR, or tracking,
+        // and the People sensitivity slider decides how many scans that takes.
+        facePresenceRef.current.configure({
+          framesToConfirm: confirmationScans((peopleSettings.enabled ? peopleSettings : animalsSettings).sensitivity),
+        });
+        const presence = facePresenceRef.current.update(
+          detections.filter((d) => inPeoplePipeline(d) || inAnimalPipeline(d))
+        );
         detections = presence.confirmed;
-        syncFaceTriggeredDvr(presence.facePresent);
+        // The face-triggered DVR is a People-category reaction; with People
+        // switched off, confirmed faces may still label pets but never start
+        // a recording or announce a person.
+        syncFaceTriggeredDvr(peopleSettings.enabled && presence.facePresent);
 
-        const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
+        const cameraMotionActive = sensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
-          // Correlate with tracked objects and update positions and labels
+          // Correlate with tracked objects and update positions and labels.
+          // Naming follows the Face Database similarity slider across its full
+          // range instead of a hidden fixed floor, and only detections inside
+          // an open category gate may spawn person tracks.
           const updated = faceRecognitionService.correlateDetections(
             detectedObjectsRef.current,
-            detections,
+            detections.filter((d) => inPeoplePipeline(d) || (inAnimalPipeline(d) && isCompreFaceAnimal(d))),
             snapW,
             snapH,
-            Math.max(0.97, storagePreferences.faceMatchThreshold || 0.92),
-            StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
+            identityThreshold(storagePreferencesRef.current.faceMatchThreshold),
+            animalNames
           );
           detectedObjectsRef.current = updated;
           setDetectedObjects([...updated]);
 
+          const peopleAlertsOn = peopleSettings.enabled && peopleSettings.triggerAlert;
+          const threatAlertsOn = sensitivities.threats.enabled && sensitivities.threats.triggerAlert;
+          const animalAlertsOn = animalsSettings.enabled && animalsSettings.triggerAlert;
+
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
           for (const d of detections) {
-            const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
-            if (topSubj && faceRecognitionService.isConservativeMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
+            const goesToPeople = inPeoplePipeline(d);
+            const goesToAnimals = inAnimalPipeline(d);
+            const center = detectionCenter(d, snapW, snapH);
+            const topSubj = topSubjectOf(d);
+            if (topSubj && goesToPeople && faceRecognitionService.isConservativeMatch(d, storagePreferencesRef.current.faceMatchThreshold)) {
               const matchedProfile = StorageService.getFaceProfiles().find((profile) => profile.name.toLowerCase() === topSubj.subject.toLowerCase());
               const isIntruder = matchedProfile?.role === 'intruder';
               StorageService.updateFaceLastSeenByName(topSubj.subject);
@@ -706,7 +789,7 @@ export function App() {
                 outputSize: 256,
                 quality: 0.86,
               });
-              if (isIntruder) {
+              if (isIntruder && peopleAlertsOn && threatAlertsOn) {
                 notifyAlert({
                   title: `Intruder identified: ${topSubj.subject}`,
                   message: `${topSubj.subject} is flagged as an intruder and is present in the camera view.`,
@@ -715,6 +798,7 @@ export function App() {
                   confidence: topSubj.similarity,
                   faceImage: identityThumbnail,
                   tone: 'intruder_siren',
+                  playTone: sensitivities.threats.audibleChime,
                   dedupeKey: `intruder:${topSubj.subject.toLowerCase()}`,
                   cooldownMs: 30_000,
                   speech: `Warning. ${topSubj.subject} has been identified and is flagged as an intruder.`,
@@ -732,13 +816,14 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `face:${identityKey}`, 60_000);
-                if (!isIntruder) notifyAlert({
+                if (!isIntruder && peopleAlertsOn) notifyAlert({
                   title: `${topSubj.subject} identified`,
                   message: `${topSubj.subject} was matched to a saved face profile and is present in the scene.`,
                   severity: 'info',
                   subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                   faceImage: identityThumbnail,
+                  playTone: peopleSettings.audibleChime,
                   dedupeKey: `identity:${identityKey}`,
                   cooldownMs: 60_000,
                 });
@@ -757,13 +842,14 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `approach:${identityKey}`, 60_000);
-                if (approached) notifyAlert({
+                if (approached && peopleAlertsOn && threatAlertsOn) notifyAlert({
                   title: `${topSubj.subject} is approaching`,
                   message: `${topSubj.subject} moved noticeably closer to the camera.`,
                   severity: 'warning',
                   subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                   faceImage: identityThumbnail,
+                  playTone: sensitivities.threats.audibleChime,
                   dedupeKey: `approach-alert:${identityKey}`,
                   cooldownMs: 60_000,
                   speech: `${topSubj.subject} is approaching the camera.`,
@@ -781,63 +867,82 @@ export function App() {
               });
               // Animal profiles are recognized locally against their enrolled
               // reference photos, independently of CompreFace's human-face
-              // database. This turns the existing animal album into a true pet
-              // recognition path rather than only a manual label.
-              if (faceCrop) {
-                const petMatch = await petRecognitionService.match(faceCrop, StorageService.getFaceProfiles());
-                if (petMatch) {
+              // database. The colour-signature comparison is weak, so a pet
+              // name is attached only when the Animals gate is open, the match
+              // clears the animal threshold, and a second agreeing scan
+              // confirms it — a single hit must never label a human as a pet.
+              let handledAsPet = false;
+              if (goesToAnimals && faceCrop) {
+                const petMatch = await petRecognitionService.match(faceCrop, StorageService.getFaceProfiles(), petMatchThreshold(animalsSettings));
+                const confirmedPet = petConfirmerRef.current.confirm(
+                  unknownFaceAlertKey(activeCamId, center.x, center.y),
+                  petMatch
+                );
+                if (confirmedPet) {
+                  handledAsPet = true;
                   const animalDetection = {
                     ...d,
-                    subjects: [{ subject: petMatch.profile.name, similarity: petMatch.similarity }],
+                    subjects: [{ subject: confirmedPet.profile.name, similarity: confirmedPet.similarity }],
                   };
                   const animalUpdated = faceRecognitionService.correlateDetections(
                     detectedObjectsRef.current,
                     [animalDetection],
                     snapW,
                     snapH,
-                    0.85,
-                    StorageService.getFaceProfiles().filter((profile) => profile.subjectType === 'animal').map((profile) => profile.name)
+                    petMatchThreshold(animalsSettings),
+                    animalNames
                   );
                   detectedObjectsRef.current = animalUpdated;
                   setDetectedObjects([...animalUpdated]);
-                  StorageService.updateFaceLastSeenByName(petMatch.profile.name);
+                  StorageService.updateFaceLastSeenByName(confirmedPet.profile.name);
                   recordHistoryEvent({
                     type: 'animal_detected',
-                    title: `${petMatch.profile.name} recognized`,
-                    details: `${petMatch.profile.name} was recognized locally from its enrolled animal reference photos.`,
+                    title: `${confirmedPet.profile.name} recognized`,
+                    details: `${confirmedPet.profile.name} was recognized locally from its enrolled animal reference photos.`,
                     severity: 'info',
-                    subjectName: petMatch.profile.name,
-                    confidence: petMatch.similarity,
-                  }, `animal:${activeCamId}:${petMatch.profile.name}`, 60_000);
-                  notifyAlert({
-                    title: `${petMatch.profile.name} recognized`,
-                    message: `${petMatch.profile.name} was recognized locally from its enrolled animal photos.`,
+                    subjectName: confirmedPet.profile.name,
+                    confidence: confirmedPet.similarity,
+                  }, `animal:${activeCamId}:${confirmedPet.profile.name}`, 60_000);
+                  if (animalAlertsOn) notifyAlert({
+                    title: `${confirmedPet.profile.name} recognized`,
+                    message: `${confirmedPet.profile.name} was recognized locally from its enrolled animal photos.`,
                     severity: 'info',
-                    subjectName: petMatch.profile.name,
-                    confidence: petMatch.similarity,
+                    subjectName: confirmedPet.profile.name,
+                    confidence: confirmedPet.similarity,
                     faceImage: faceCrop,
-                    dedupeKey: `animal-alert:${activeCamId}:${petMatch.profile.name}`,
+                    playTone: animalsSettings.audibleChime,
+                    dedupeKey: `animal-alert:${activeCamId}:${confirmedPet.profile.name}`,
                     cooldownMs: 60_000,
-                    speech: `${petMatch.profile.name} has been identified in the monitored area.`,
+                    speech: `${confirmedPet.profile.name} has been identified in the monitored area.`,
                   });
-                  continue;
+                } else if (petMatch) {
+                  // Candidate pet awaiting its second agreeing scan. Treating
+                  // the same face as an unknown person right now would raise a
+                  // false alarm for what is probably the enrolled pet.
+                  handledAsPet = true;
                 }
               }
-              StorageService.catalogUnknownFace(
-                'Unknown Subject',
-                'person',
-                'Face captured from CompreFace detection. Review and assign to a person, or save it as an animal profile for local pet recognition.',
-                faceCrop
-              );
-              notifyAlert({
-                title: 'Unidentified person detected',
-                message: 'An unknown face was captured and saved to the face album for review.',
-                severity: 'warning',
-                faceImage: faceCrop,
-                dedupeKey: `unknown-face:${activeCamId}`,
-                cooldownMs: 45_000,
-                speech: 'An unidentified person has been detected.',
-              });
+              if (!handledAsPet && goesToPeople) {
+                StorageService.catalogUnknownFace(
+                  'Unknown Subject',
+                  'person',
+                  'Face captured from CompreFace detection. Review and assign to a person, or save it as an animal profile for local pet recognition.',
+                  faceCrop
+                );
+                if (peopleAlertsOn) notifyAlert({
+                  title: 'Unidentified person detected',
+                  message: 'An unknown face was captured and saved to the face album for review.',
+                  severity: 'warning',
+                  faceImage: faceCrop,
+                  playTone: peopleSettings.audibleChime,
+                  // Keyed to where the face is: a static face-like pattern in
+                  // one spot is throttled hard, while a person moving through
+                  // the view crosses cells and alerts normally.
+                  dedupeKey: `unknown-face:${unknownFaceAlertKey(activeCamId, center.x, center.y)}`,
+                  cooldownMs: 120_000,
+                  speech: 'An unidentified person has been detected.',
+                });
+              }
             }
           }
           setFaceProfiles(StorageService.getFaceProfiles());
@@ -859,7 +964,7 @@ export function App() {
       isMounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, notifyAlert, isPhone]);
+  }, [storagePreferences.facialRecognitionMasterEnabled, activeCamId, recordHistoryEvent, detectGlobalCameraMotion, notifyAlert, isPhone]);
 
   // --- Audio-visual sound cues -------------------------------------------
   // Microphone capture runs only while the accessibility setting is enabled,
@@ -1472,7 +1577,7 @@ export function App() {
                     dets,
                     frame.width,
                     frame.height,
-                    storagePreferences.faceMatchThreshold || 0.92
+                    identityThreshold(storagePreferences.faceMatchThreshold)
                   );
                   detectedObjectsRef.current = updated;
                   setDetectedObjects([...updated]);

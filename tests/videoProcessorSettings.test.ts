@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DetectionObject, NightVisionSettings, RedSilhouetteSettings, VideoProcessingSettings, AccessibilitySettings } from '../src/types';
+import { DetectionObject, DetectionSensitivities, NightVisionSettings, RedSilhouetteSettings, VideoProcessingSettings, AccessibilitySettings } from '../src/types';
 
 /**
  * These tests guard the wiring between the settings panel and the render
@@ -14,6 +14,9 @@ type Call = { op: string; args: unknown[] };
 function makeCtx(calls: Call[]): any {
   const record = (op: string) => (...args: unknown[]) => { calls.push({ op, args }); };
   const ctx: any = {
+    // Style assignments are recorded like draw calls so tests can assert colors.
+    set strokeStyle(value: unknown) { calls.push({ op: 'set:strokeStyle', args: [value] }); },
+    set fillStyle(value: unknown) { calls.push({ op: 'set:fillStyle', args: [value] }); },
     canvas: { width: 1280, height: 720 },
     save: record('save'),
     restore: record('restore'),
@@ -87,6 +90,7 @@ async function render(
     videoProcessing?: Partial<VideoProcessingSettings>;
     accessibility?: Partial<AccessibilitySettings>;
     detections?: DetectionObject[];
+    detectionSensitivities?: DetectionSensitivities;
   } = {},
 ) {
   const canvas = setupDom(calls);
@@ -103,8 +107,25 @@ async function render(
     { ...redSilhouetteOff, ...overrides.redSilhouette },
     { ...videoProcessingOff, ...overrides.videoProcessing },
     { ...accessibilityOff, ...overrides.accessibility },
+    overrides.detectionSensitivities,
   );
   return calls;
+}
+
+function sensitivitiesWith(peopleColor: string): DetectionSensitivities {
+  const category = (highlightColor: string) => ({
+    enabled: true, sensitivity: 70, confidenceThreshold: 0.6, highlightColor,
+    triggerAlert: true, audibleChime: false, detectionZone: 'full_frame' as const,
+  });
+  return {
+    fixedCameraGuard: false,
+    people: category(peopleColor),
+    threats: category('#dc2626'),
+    animals: category('#10b981'),
+    cars: category('#f59e0b'),
+    objects: category('#06b6d4'),
+    weather: category('#8b5cf6'),
+  };
 }
 
 test('red silhouette toggle actually paints the subject', async () => {
@@ -168,4 +189,24 @@ test('the recognition name plate is drawn large, outlined, and in white', async 
   assert.ok(strokeText, 'label must have a dark outline pass for contrast');
   assert.ok(fillText, 'label must render the recognized name');
   assert.equal(String(fillText!.args[0]), 'Dana');
+});
+
+test('the HUD box color follows the category highlight color setting', async () => {
+  const withSettings: Call[] = [];
+  await render(withSettings, { detectionSensitivities: sensitivitiesWith('#3b82f6') });
+  assert.ok(
+    withSettings.some((c) => c.op === 'set:strokeStyle' && c.args[0] === '#3b82f6'),
+    'the configured people highlight color must reach the HUD stroke style'
+  );
+
+  const fallback: Call[] = [];
+  await render(fallback);
+  assert.ok(
+    !fallback.some((c) => c.op === 'set:strokeStyle' && c.args[0] === '#3b82f6'),
+    'without settings the custom color must not appear'
+  );
+  assert.ok(
+    fallback.some((c) => c.op === 'set:strokeStyle' && c.args[0] === '#ef4444'),
+    'person boxes fall back to the built-in red'
+  );
 });

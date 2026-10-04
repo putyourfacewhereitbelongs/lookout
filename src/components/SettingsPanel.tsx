@@ -338,6 +338,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
           <AiSensitivitiesSection
             sensitivities={detectionSensitivities}
             onChange={onDetectionSensitivitiesChange}
+            faceMatchThreshold={storagePreferences.faceMatchThreshold}
           />
         )}
 
