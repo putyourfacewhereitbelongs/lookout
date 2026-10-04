@@ -324,6 +324,19 @@ export interface AudioVisualCue {
   label: string;
   confidence: number;
   dbLevel: number;
+  /** Which audio source produced the cue (camera id, 'screen', or 'microphone'). */
+  sourceId?: string;
+  /** Human-readable name of that source, e.g. "Shared tab" or "Front Door". */
+  sourceLabel?: string;
+}
+
+/** An audio input the cue pipeline can listen to. */
+export interface AudioCueSource {
+  id: string;
+  label: string;
+  stream: MediaStream;
+  /** True when this service opened the stream and must release it on stop. */
+  owned?: boolean;
 }
 
 export interface SavedRecording {

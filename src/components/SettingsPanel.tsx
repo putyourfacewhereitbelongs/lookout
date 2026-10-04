@@ -18,6 +18,7 @@ import {
   Shield,
   ChevronRight,
   ChevronLeft,
+  Ear,
 } from 'lucide-react';
 import {
   NightVisionSettings,
@@ -32,6 +33,7 @@ import {
   StoragePreferences,
   FaceProfile,
   UIThemeMode,
+  AudioVisualCue,
 } from '../types';
 
 import { AiSensitivitiesSection } from './settings/AiSensitivitiesSection';
@@ -42,6 +44,7 @@ import { PwaOfflineSection } from './settings/PwaOfflineSection';
 import { CloudSyncSection } from './settings/CloudSyncSection';
 import { StoragePreferencesSection } from './settings/StoragePreferencesSection';
 import { ThemeDisplaySection } from './settings/ThemeDisplaySection';
+import { AccessibilitySection } from './settings/AccessibilitySection';
 
 export type SettingsTabId =
   | 'ai_detection'
@@ -51,7 +54,8 @@ export type SettingsTabId =
   | 'pwa_offline'
   | 'cloud_sync'
   | 'storage_prefs'
-  | 'theme_display';
+  | 'theme_display'
+  | 'accessibility';
 
 interface SettingsPanelProps {
   nightVision: NightVisionSettings;
@@ -78,6 +82,8 @@ interface SettingsPanelProps {
   onFaceProfilesChange: (p: FaceProfile[]) => void;
   currentTheme: UIThemeMode;
   onThemeChange: (t: UIThemeMode) => void;
+  audioCues?: AudioVisualCue[];
+  audioSourceNames?: string[];
   onClose?: () => void;
   initialTab?: SettingsTabId;
 }
@@ -147,6 +153,13 @@ const SETTINGS_TABS: TabItem[] = [
     icon: <Palette className="w-4 h-4 text-rose-400" />,
     badge: 'DARK / OLED',
   },
+  {
+    id: 'accessibility',
+    label: 'Accessibility & Sound Cues',
+    shortLabel: 'Accessibility',
+    icon: <Ear className="w-4 h-4 text-cyan-400" />,
+    badge: 'AUDIO AI',
+  },
 ];
 
 export const SettingsPanel: React.FC<SettingsPanelProps> = ({
@@ -158,6 +171,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onVideoProcessingChange,
   accessibility,
   onAccessibilityChange,
+  audioCues = [],
+  audioSourceNames = [],
   emergencyContacts,
   onEmergencyContactsChange,
   detectionSensitivities,
@@ -374,6 +389,15 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
             onRefreshAllState={() => {
               onFaceProfilesChange(faceProfiles);
             }}
+          />
+        )}
+
+        {activeTab === 'accessibility' && (
+          <AccessibilitySection
+            settings={accessibility}
+            onChange={onAccessibilityChange}
+            recentCues={audioCues}
+            audioSourceNames={audioSourceNames}
           />
         )}
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Shield,
   Eye,
@@ -41,6 +41,8 @@ import {
   StoragePreferences,
   UIThemeMode,
   HistoryEvent,
+  AudioVisualCue,
+  AudioCueSource,
 } from './types';
 
 import { StorageService } from './services/db';
@@ -65,6 +67,11 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
+import { narrateScene } from './services/sceneNarrator';
+import { FacePresenceTracker } from './services/faceDetectionGate';
+import { audioCueService, captureElementAudio } from './services/audioCueService';
+import { AudioCueOverlay } from './components/AudioCueOverlay';
+import { CUE_SEVERITY } from './services/audioCueClassifier';
 import { AlertToastStack } from './components/AlertToastStack';
 import { motion } from 'motion/react';
 
@@ -147,6 +154,13 @@ export function App() {
 
   // State: Detection & Telemetry
   const [detectedObjects, setDetectedObjects] = useState<DetectionObject[]>([]);
+  const [audioCues, setAudioCues] = useState<AudioVisualCue[]>([]);
+  const [audioSourceNames, setAudioSourceNames] = useState<string[]>([]);
+  // Read inside the stream-setup effect so camera acquisition knows whether to
+  // ask for an audio track at all.
+  // Initialised from the saved setting so the very first camera acquisition
+  // on page load already knows whether to ask for an audio track.
+  const wantsAudioRef = useRef(accessibility.audioVisualCues);
   const streamStageRef = useRef<HTMLDivElement | null>(null);
   const [isRecordingNow, setIsRecordingNow] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
@@ -229,6 +243,16 @@ export function App() {
     const { captureGif = true, ...alert } = input;
     const id = alertCenter.push({ cameraName: activeCameraRef.current?.name, ...alert });
     if (!id) return null;
+
+    // Accessibility preferences apply to every raised alert.
+    const access = accessibilityRef.current;
+    if (access?.hapticFeedback && typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(alert.severity === 'critical' ? [120, 60, 120, 60, 200] : alert.severity === 'warning' ? [90, 50, 90] : 60);
+    }
+    if (access?.voiceCommandsAndNarration && alert.speak !== false) {
+      audioEngine.speakSceneDescription(`${alert.title}. ${alert.message}`);
+    }
+
     const canvas = canvasRef.current;
     // Only one capture runs at a time so overlapping alerts cannot stack
     // several per-frame pixel reads on top of the live render loop.
@@ -382,9 +406,13 @@ export function App() {
             : { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } };
           let s: MediaStream;
           try {
+            // Capture camera audio only when the sound-cue feature is on, so
+            // the microphone is never opened for users who have not asked.
             s = await navigator.mediaDevices.getUserMedia({
               video,
-              audio: false,
+              audio: wantsAudioRef.current
+                ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+                : false,
             });
           } catch {
             // Preserve the camera feed on devices without an available microphone.
@@ -405,9 +433,11 @@ export function App() {
         }
       } else if (activeCamera.type === 'screen') {
         try {
+          // Requesting audio makes the browser offer the "share tab audio"
+          // checkbox, which is what feeds the acoustic classifier.
           const s = await navigator.mediaDevices.getDisplayMedia({
             video: isPhone ? { frameRate: { ideal: 30, max: 30 } } : { frameRate: { ideal: 60 } },
-            audio: false,
+            audio: wantsAudioRef.current,
           });
           currentStream = s;
           attachStream(s);
@@ -430,7 +460,7 @@ export function App() {
         currentStream.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [activeCamId, activeCamera, cameraRetryKey, isPhone]);
+  }, [activeCamId, activeCamera, cameraRetryKey, isPhone, accessibility.audioVisualCues]);
 
   // References for the lightweight render pipeline
   const detectedObjectsRef = useRef<DetectionObject[]>([]);
@@ -440,7 +470,14 @@ export function App() {
   const videoProcessingRef = useRef(videoProcessing);
   const accessibilityRef = useRef(accessibility);
 
+  const camerasRef = useRef(cameras);
+  // Confirms a face across consecutive recognition scans before the app
+  // reacts to it, which is what prevents empty-scene "face detected" alerts.
+  const facePresenceRef = useRef(new FacePresenceTracker());
+
   useEffect(() => { activeCameraRef.current = activeCamera; }, [activeCamera]);
+  useEffect(() => { camerasRef.current = cameras; }, [cameras]);
+  useEffect(() => { wantsAudioRef.current = accessibility.audioVisualCues; }, [accessibility.audioVisualCues]);
   useEffect(() => { nightVisionRef.current = nightVision; }, [nightVision]);
   useEffect(() => { redSilhouetteRef.current = redSilhouette; }, [redSilhouette]);
   useEffect(() => { videoProcessingRef.current = videoProcessing; }, [videoProcessing]);
@@ -553,6 +590,8 @@ export function App() {
   useEffect(() => {
     let isMounted = true;
     let timer: any = null;
+    // Switching cameras must not inherit the previous view's confirmations.
+    facePresenceRef.current.reset();
 
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
@@ -591,6 +630,9 @@ export function App() {
       }
 
       if (!snapshotBase64) {
+        // No frame means no evidence of anyone; clear accumulated presence so
+        // a resumed feed must re-confirm from scratch.
+        facePresenceRef.current.reset();
         syncFaceTriggeredDvr(false);
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
@@ -606,13 +648,13 @@ export function App() {
         if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
         let detections = useLongRange && recognitionCanvas
           ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
-          : await faceRecognitionService.recognize(snapshotBase64);
+          : await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
         // Borderline identities get a second independent inference on the same
         // high-resolution frame. A name survives only when both checks agree;
         // a disagreement becomes an unknown face instead of a false alert.
         const needsSecondCheck = detections.some((detection) => (detection.subjects?.[0]?.similarity || 0) < 0.96 && (detection.subjects?.length || 0) > 0);
         if (needsSecondCheck) {
-          const secondPass = await faceRecognitionService.recognize(snapshotBase64);
+          const secondPass = await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
           detections = detections.map((detection) => {
             const firstSubject = detection.subjects?.[0];
             if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
@@ -625,7 +667,12 @@ export function App() {
             return corroborating ? { ...detection, subjects: [corroborating.subjects![0]] } : { ...detection, subjects: [] };
           });
         }
-        syncFaceTriggeredDvr(detections.length > 0);
+        // A real person appears in consecutive scans at a consistent place;
+        // detector pareidolia on foliage, wood grain, or sensor noise flickers
+        // in and out. Only confirmed faces may drive alerts, DVR, or tracking.
+        const presence = facePresenceRef.current.update(detections);
+        detections = presence.confirmed;
+        syncFaceTriggeredDvr(presence.facePresent);
 
         const cameraMotionActive = detectionSensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
@@ -814,6 +861,99 @@ export function App() {
     };
   }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, notifyAlert, isPhone]);
 
+  // --- Audio-visual sound cues -------------------------------------------
+  // Microphone capture runs only while the accessibility setting is enabled,
+  // and is torn down the moment it is switched off.
+  useEffect(() => {
+    if (!accessibility.audioVisualCues) {
+      audioCueService.stop();
+      return;
+    }
+
+    let cancelled = false;
+    const unsubscribe = audioCueService.onCue((cue) => {
+      if (cancelled) return;
+      setAudioCues((prev) => [cue, ...prev].slice(0, 40));
+
+      const severity = CUE_SEVERITY[cue.type];
+      recordHistoryEvent(
+        {
+          type: 'scene_alert',
+          title: cue.label,
+          details: `Detected acoustically at ${cue.dbLevel.toFixed(0)} dBFS with ${Math.round(cue.confidence * 100)}% confidence.`,
+          severity,
+          confidence: cue.confidence,
+        },
+        `audio-cue-${cue.type}`,
+        8000,
+      );
+
+      // Only the genuinely urgent classes raise a toast; speech and footsteps
+      // would otherwise fire constantly in a busy space.
+      if (severity === 'critical' || cue.type === 'impact') {
+        notifyAlert({
+          title: cue.label,
+          message: `Sound detected on ${activeCameraRef.current?.name || 'the active camera'} at ${cue.dbLevel.toFixed(0)} dBFS.`,
+          severity,
+          speak: accessibility.voiceCommandsAndNarration,
+          playTone: true,
+          captureGif: false,
+          durationMs: 7000,
+        });
+      }
+    });
+
+    // Collect every audio-bearing source: the shared tab/screen or webcam
+    // attached to the active camera, any added camera that carries its own
+    // audio track, and network/demo feeds whose audio lives on the <video>
+    // element. The microphone is used only if none of those provide audio.
+    const collectSources = (): AudioCueSource[] => {
+      const sources: AudioCueSource[] = [];
+      const seen = new Set<MediaStream>();
+
+      const push = (id: string, label: string, stream: MediaStream | null | undefined) => {
+        if (!stream || seen.has(stream) || stream.getAudioTracks().length === 0) return;
+        seen.add(stream);
+        sources.push({ id, label, stream, owned: false });
+      };
+
+      const live = videoElementRef.current?.srcObject as MediaStream | null;
+      const active = activeCameraRef.current;
+      push(active?.id || 'active', active?.name || 'Active camera', live);
+
+      // Network, Wyze, and demo feeds play from a URL, so their audio is only
+      // reachable by capturing the media element itself.
+      if (!live) push(`${active?.id || 'active'}-element`, active?.name || 'Active camera', captureElementAudio(videoElementRef.current));
+
+      camerasRef.current.forEach((camera) => {
+        if (camera.stream) push(camera.id, camera.name, camera.stream);
+      });
+
+      return sources;
+    };
+
+    const syncSources = () => {
+      const sources = collectSources();
+      void audioCueService.start(sources, true).then(() => {
+        if (cancelled) return;
+        setAudioSourceNames(audioCueService.activeSources.map((source) => source.label));
+      });
+    };
+
+    syncSources();
+    // Re-scan periodically so a tab shared (or stopped) mid-session is picked
+    // up without the user having to toggle the setting.
+    const rescan = window.setInterval(syncSources, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(rescan);
+      unsubscribe();
+      audioCueService.stop();
+      setAudioSourceNames([]);
+    };
+  }, [accessibility.audioVisualCues, accessibility.voiceCommandsAndNarration, activeCamId, recordHistoryEvent, notifyAlert]);
+
   // Recording Clock Timer
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -827,29 +967,21 @@ export function App() {
     return () => clearInterval(interval);
   }, [isRecordingNow]);
 
-  const buildSceneDescription = () => {
-    const visibleSubjects = detectedObjects
-      .map((object) => object.subjectName || object.nameTag || object.label)
-      .filter(Boolean)
-      .filter((value, index, values) => values.indexOf(value) === index)
-      .slice(0, 8);
-    const people = detectedObjects.filter((object) => object.category === 'person');
-    const animals = detectedObjects.filter((object) => object.category === 'animal');
-    const packageObject = detectedObjects.find((object) => /package|parcel|box|delivery/i.test(object.label));
-    if (packageObject) return `${activeCamera.name}: a package or delivery is visible at the monitored entry area`;
-    if (people.length > 1) {
-      const names = people.map((person) => person.subjectName || 'an unidentified person');
-      return `${activeCamera.name}: ${names[0]} appears to be talking with ${names.slice(1).join(' and ')}`;
-    }
-    if (people[0]?.subjectName) return `${activeCamera.name}: ${people[0].subjectName} is ${people[0].posture || 'present'} in the yard or driveway scene`;
-    if (people.length) return `${activeCamera.name}: a person is ${people[0].posture || 'moving'} through the monitored yard or driveway`;
-    if (animals.length) return `${activeCamera.name}: ${animals.map((animal) => animal.subjectName || animal.label).join(' and ')} ${animals[0].posture || 'is visible'} in the scene`;
-    return visibleSubjects.length > 0
-      ? `${activeCamera.name}: ${visibleSubjects.join(', ')} visible in the scene`
-      : `${activeCamera.name}: no active subjects; live camera scene is clear`;
-  };
+  // Rich narration of what is actually on screen and who, derived from every
+  // attribute the recognition pipeline attaches to a detection.
+  const sceneNarration = useMemo(
+    () =>
+      narrateScene(detectedObjects, {
+        cameraName: activeCamera.name,
+        faceProfiles,
+        nightVisionEnabled: nightVision.enabled,
+      }),
+    [detectedObjects, activeCamera.name, faceProfiles, nightVision.enabled],
+  );
 
-  const liveSceneDetails = buildSceneDescription();
+  const buildSceneDescription = () => sceneNarration.detailed;
+
+  const liveSceneDetails = sceneNarration.summary;
 
   // Handle Recording Toggle (captures the lightweight 30 FPS display stream)
   const handleToggleRecord = () => {
@@ -1251,11 +1383,13 @@ export function App() {
               <Maximize2 className="h-4 w-4" />
             </button>
           </div>
+          <AudioCueOverlay cues={audioCues} enabled={accessibility.audioVisualCues} />
           <SceneCaptionOverlay details={liveSceneDetails} enabled={sceneOverlayEnabled} />
         </motion.div>
 
         <SceneDetailsPanel
           details={liveSceneDetails}
+          narration={sceneNarration}
           detections={detectedObjects}
           overlayEnabled={sceneOverlayEnabled}
           onOverlayChange={setSceneOverlayEnabled}
@@ -1441,6 +1575,8 @@ export function App() {
             onVideoProcessingChange={setVideoProcessing}
             accessibility={accessibility}
             onAccessibilityChange={setAccessibility}
+            audioCues={audioCues}
+            audioSourceNames={audioSourceNames}
             emergencyContacts={emergencyContacts}
             onEmergencyContactsChange={setEmergencyContacts}
             detectionSensitivities={detectionSensitivities}
