@@ -125,8 +125,8 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      // Allow Cloudflare domains to bypass Vite's host checking security
-      allowedHosts: ['cloudflare.com', '.cloudflare.com'],
+      // The Arena live preview uses a dynamic *.e2b.app hostname.
+      allowedHosts: ['cloudflare.com', '.cloudflare.com', '.e2b.app'],
     },
   };
 });

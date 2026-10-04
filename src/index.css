@@ -32,6 +32,80 @@ button,
   touch-action: manipulation;
 }
 
+/* A quiet identification inset: the captured frame eases in and gets one
+   barely-visible scan pass so it reads as a live camera artifact, not a modal
+   or a static notification card. */
+@keyframes lookout-identification-in {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -5px, 0) scale(0.97);
+  }
+  14%,
+  86% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -2px, 0) scale(0.99);
+  }
+}
+
+@keyframes lookout-identification-scan {
+  0%,
+  16% {
+    transform: translateY(-115%);
+    opacity: 0;
+  }
+  30% {
+    opacity: 0.35;
+  }
+  70% {
+    opacity: 0.12;
+  }
+  92%,
+  100% {
+    transform: translateY(115%);
+    opacity: 0;
+  }
+}
+
+.lookout-identification-notice {
+  animation: lookout-identification-in 5.2s ease-out both;
+}
+
+.lookout-identification-preview::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  pointer-events: none;
+  background: linear-gradient(to bottom, transparent 35%, rgba(103, 232, 249, 0.5) 50%, transparent 65%);
+  animation: lookout-identification-scan 3.8s ease-in-out 0.25s both;
+  mix-blend-mode: screen;
+}
+
+.lookout-identification-gif {
+  animation: lookout-identification-drift 2.8s ease-in-out infinite alternate;
+  filter: saturate(1.04) contrast(1.03);
+}
+
+@keyframes lookout-identification-drift {
+  from {
+    transform: scale(1.015) translate3d(-0.5%, 0, 0);
+  }
+  to {
+    transform: scale(1.045) translate3d(0.5%, -0.5%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lookout-identification-notice,
+  .lookout-identification-gif,
+  .lookout-identification-preview::after {
+    animation: none;
+  }
+}
+
 /* Custom scrollbar for desktop views */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;

@@ -295,9 +295,9 @@ export const AlertsTonesSection: React.FC<AlertsTonesSectionProps> = ({
                 className="accent-cyan-500 rounded mt-0.5"
               />
               <div>
-                <span className="font-bold text-slate-200 block">On-Screen HUD Banners</span>
+                <span className="font-bold text-slate-200 block">Live-Feed Identification Chips</span>
                 <span className="text-[10px] text-slate-400">
-                  Real-time colored telemetry banner displayed over active video viewport
+                  Small animated camera-frame inset over the video; never a full-screen popup
                 </span>
               </div>
             </label>
@@ -405,7 +405,7 @@ export const AlertsTonesSection: React.FC<AlertsTonesSectionProps> = ({
               </div>
             </div>
             <span className="text-[9px] text-slate-500 block">
-              Mutes acoustic chimes while keeping HUD visual recording active.
+              Mutes chimes and spoken identity announcements while keeping the small live-feed chip active.
             </span>
           </div>
         </div>
@@ -431,7 +431,7 @@ export const AlertsTonesSection: React.FC<AlertsTonesSectionProps> = ({
         </div>
 
         <p className="text-slate-400 text-[11px]">
-          Uses synthetic voice to articulate scene activity, detected family members, and obstacle hazards for hands-free audio surveillance.
+          Announces the saved name of each newly identified person or animal for hands-free audio surveillance, with optional scene narration.
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">

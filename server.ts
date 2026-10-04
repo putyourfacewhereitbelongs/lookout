@@ -417,7 +417,11 @@ app.get('/api/sync/pull', (req, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        // Arena's browser preview is served from a dynamic *.e2b.app host.
+        allowedHosts: ['.e2b.app', 'cloudflare.com', '.cloudflare.com'],
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

@@ -8,6 +8,7 @@ import {
   QrCode,
   Settings,
   Users,
+  UserRound,
   Video,
   VideoOff,
   Camera,
@@ -81,6 +82,57 @@ const INITIAL_CAMERAS: CameraSource[] = [
   },
 ];
 
+interface RecognitionNotice {
+  id: number;
+  subjectName: string;
+  confidence: number;
+  preview?: string;
+}
+
+/**
+ * Makes a small 16:9 frame from the same CompreFace source image used by the
+ * live renderer. Keeping the source frame (rather than a stock avatar) makes
+ * the identification chip read as part of the camera feed, not a modal alert.
+ */
+function createIdentificationPreview(canvas: HTMLCanvasElement, box: { x_min: number; y_min: number; x_max: number; y_max: number }): string | undefined {
+  const sourceWidth = canvas.width;
+  const sourceHeight = canvas.height;
+  const faceWidth = Math.max(1, box.x_max - box.x_min);
+  const faceHeight = Math.max(1, box.y_max - box.y_min);
+  const centerX = (box.x_min + box.x_max) / 2;
+  const centerY = (box.y_min + box.y_max) / 2;
+  const aspect = 16 / 9;
+
+  // Include enough surrounding scene to preserve the feel of the live feed,
+  // while keeping the identified face large enough to recognize.
+  let cropWidth = Math.max(faceWidth * 2.8, faceHeight * aspect * 2.35);
+  let cropHeight = cropWidth / aspect;
+  if (cropHeight < faceHeight * 2.35) {
+    cropHeight = faceHeight * 2.35;
+    cropWidth = cropHeight * aspect;
+  }
+  cropWidth = Math.min(sourceWidth, cropWidth);
+  cropHeight = Math.min(sourceHeight, cropHeight);
+
+  let sx = Math.max(0, Math.min(sourceWidth - cropWidth, centerX - cropWidth / 2));
+  let sy = Math.max(0, Math.min(sourceHeight - cropHeight, centerY - cropHeight / 2));
+  if (!Number.isFinite(sx) || !Number.isFinite(sy) || cropWidth <= 0 || cropHeight <= 0) return undefined;
+
+  try {
+    const preview = document.createElement('canvas');
+    preview.width = 320;
+    preview.height = 180;
+    const context = preview.getContext('2d');
+    if (!context) return undefined;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(canvas, sx, sy, cropWidth, cropHeight, 0, 0, preview.width, preview.height);
+    return preview.toDataURL('image/jpeg', 0.82);
+  } catch {
+    return undefined;
+  }
+}
+
 export function App() {
   // State: Cameras
   const [cameras, setCameras] = useState<CameraSource[]>(() => {
@@ -98,6 +150,7 @@ export function App() {
   const [recordings, setRecordings] = useState<SavedRecording[]>(StorageService.getRecordings());
   const [historyEvents, setHistoryEvents] = useState<HistoryEvent[]>(StorageService.getHistoryEvents());
   const [liveAlert, setLiveAlert] = useState('');
+  const [recognitionNotice, setRecognitionNotice] = useState<RecognitionNotice | null>(null);
   const [cameraFeedError, setCameraFeedError] = useState('');
   const [cameraRetryKey, setCameraRetryKey] = useState(0);
   const [faceProfiles, setFaceProfiles] = useState<FaceProfile[]>(StorageService.getFaceProfiles());
@@ -152,6 +205,8 @@ export function App() {
   const faceApproachRef = useRef<Map<string, { baseHeight: number; maxHeight: number; lastSeen: number; approachLogged: boolean }>>(new Map());
   const cameraMotionRef = useRef<{ previous: Uint8Array | null; suppressUntil: number }>({ previous: null, suppressUntil: 0 });
   const motionSampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const recognitionNoticeTimerRef = useRef<number | null>(null);
+  const identityAnnouncementCooldownsRef = useRef<Map<string, number>>(new Map());
 
   const detectGlobalCameraMotion = useCallback((frame: HTMLCanvasElement) => {
     if (!detectionSensitivities.fixedCameraGuard) return false;
@@ -202,6 +257,68 @@ export function App() {
     });
     setHistoryEvents(saved);
   }, [activeCamera, activeCamId]);
+
+  const isWithinQuietHours = useCallback(() => {
+    if (!alertNotifications.quietHoursEnabled) return false;
+    const toMinutes = (value: string) => {
+      const [hours, minutes] = value.split(':').map(Number);
+      return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : 0;
+    };
+    const current = new Date();
+    const currentMinutes = current.getHours() * 60 + current.getMinutes();
+    const start = toMinutes(alertNotifications.quietHoursStart);
+    const end = toMinutes(alertNotifications.quietHoursEnd);
+    if (start === end) return true;
+    return start < end
+      ? currentMinutes >= start && currentMinutes < end
+      : currentMinutes >= start || currentMinutes < end;
+  }, [
+    alertNotifications.quietHoursEnabled,
+    alertNotifications.quietHoursStart,
+    alertNotifications.quietHoursEnd,
+  ]);
+
+  const announceIdentity = useCallback((subjectName: string, confidence: number, preview?: string) => {
+    const name = subjectName.trim();
+    if (!name) return;
+
+    const cooldownMs = Math.max(0, alertNotifications.cooldownSeconds) * 1000;
+    const identityKey = `${activeCamId}:${name.toLowerCase()}`;
+    const now = Date.now();
+    const lastAnnouncement = identityAnnouncementCooldownsRef.current.get(identityKey) || 0;
+    if (cooldownMs > 0 && now - lastAnnouncement < cooldownMs) return;
+    identityAnnouncementCooldownsRef.current.set(identityKey, now);
+
+    if (alertNotifications.visualBanners) {
+      setRecognitionNotice({
+        id: Date.now(),
+        subjectName: name,
+        confidence,
+        preview,
+      });
+      if (recognitionNoticeTimerRef.current !== null) {
+        window.clearTimeout(recognitionNoticeTimerRef.current);
+      }
+      recognitionNoticeTimerRef.current = window.setTimeout(() => {
+        setRecognitionNotice(null);
+        recognitionNoticeTimerRef.current = null;
+      }, 5200);
+    }
+
+    // Keep the announcement and chime on the same quiet-hours policy. The
+    // visual live-feed chip remains useful at night without waking anyone.
+    if (isWithinQuietHours()) return;
+    if (alertNotifications.audibleChime) {
+      audioEngine.playAlertTone(alertNotifications.customTone, alertNotifications.alertToneVolume);
+    }
+    if (alertNotifications.ttsVoiceEnabled) {
+      audioEngine.speak(
+        `${name} has been identified.`,
+        alertNotifications.ttsVoiceRate,
+        alertNotifications.ttsVoicePitch
+      );
+    }
+  }, [activeCamId, alertNotifications, isWithinQuietHours]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 767px), (pointer: coarse)');
@@ -478,6 +595,9 @@ export function App() {
           // Update face profiles catalog: record last seen timestamp or catalog unknown faces
           detections.forEach((d) => {
             const topSubj = d.subjects && d.subjects.length > 0 ? d.subjects[0] : null;
+            const identificationPreview = recognitionCanvas && d.box
+              ? createIdentificationPreview(recognitionCanvas, d.box)
+              : undefined;
             if (topSubj && faceRecognitionService.isReliableMatch(d, storagePreferences.faceMatchThreshold || 0.92)) {
               StorageService.updateFaceLastSeenByName(topSubj.subject);
               const identityKey = `${activeCamId}:${topSubj.subject.toLowerCase()}`;
@@ -492,6 +612,7 @@ export function App() {
                   severity: 'info', subjectName: topSubj.subject,
                   confidence: topSubj.similarity,
                 }, `face:${identityKey}`, 60_000);
+                announceIdentity(topSubj.subject, topSubj.similarity, identificationPreview);
               } else {
                 const approached = !previous.approachLogged && previous.baseHeight > 0 && faceHeight >= previous.baseHeight * 1.5 && faceHeight - previous.baseHeight >= 0.035;
                 faceApproachRef.current.set(identityKey, {
@@ -559,7 +680,7 @@ export function App() {
       isMounted = false;
       if (timer) clearTimeout(timer);
     };
-  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, isPhone]);
+  }, [storagePreferences.facialRecognitionMasterEnabled, storagePreferences.faceMatchThreshold, activeCamId, detectionSensitivities.fixedCameraGuard, recordHistoryEvent, detectGlobalCameraMotion, announceIdentity, isPhone]);
 
   // Recording Clock Timer
   useEffect(() => {
@@ -723,7 +844,6 @@ export function App() {
     <div className={`app-shell min-h-screen flex flex-col font-sans select-none overflow-x-hidden ${getThemeClass(currentTheme)}`}>
       {/* Hidden background video element to pipe camera feeds to canvas */}
       <video ref={videoElementRef} className="hidden" playsInline muted autoPlay />
-      {liveAlert && <div role="alert" className="fixed left-3 right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] z-50 flex items-center gap-2 rounded-xl border border-amber-500/60 bg-amber-950/95 px-4 py-3 text-sm font-semibold text-amber-100 shadow-xl sm:left-auto sm:right-4 sm:top-16 sm:max-w-md"><AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />{liveAlert}</div>}
 
       {/* TOP PERSISTENT NAVIGATION BAR */}
       <header className="app-header sticky top-0 z-40 flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 bg-slate-950/90 px-3 py-2.5 shadow-lg backdrop-blur-md sm:flex-nowrap sm:px-4">
@@ -887,6 +1007,58 @@ export function App() {
             height={540}
             className="w-full h-full object-contain block bg-slate-950"
           />
+
+          {/* Identification feedback stays inside the video, like a tiny live
+              frame inset. It never blocks the page or takes over the screen. */}
+          {recognitionNotice && (
+            <div
+              key={recognitionNotice.id}
+              role="status"
+              aria-live="polite"
+              className="lookout-identification-notice pointer-events-none absolute right-3 top-3 z-20 flex w-[min(17rem,calc(100%-1.5rem))] items-center gap-2.5 rounded-xl border border-cyan-300/40 bg-slate-950/70 p-2 shadow-lg shadow-cyan-950/30 backdrop-blur-md sm:right-4 sm:top-4"
+            >
+              <div className="lookout-identification-preview relative h-14 w-24 shrink-0 overflow-hidden rounded-lg border border-white/20 bg-slate-900 sm:h-16 sm:w-28">
+                {recognitionNotice.preview ? (
+                  <img
+                    src={recognitionNotice.preview}
+                    alt=""
+                    className="lookout-identification-gif h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-cyan-950/70">
+                    <UserRound className="h-6 w-6 text-cyan-300" />
+                  </div>
+                )}
+                <span className="absolute bottom-1 left-1 rounded bg-black/65 px-1 py-0.5 font-mono text-[8px] font-bold tracking-wider text-cyan-100">
+                  LIVE FRAME
+                </span>
+              </div>
+              <div className="min-w-0 leading-tight">
+                <div className="flex items-center gap-1.5 font-mono text-[9px] font-bold tracking-widest text-cyan-300">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-300" />
+                  IDENTIFIED
+                </div>
+                <p className="mt-1 truncate text-sm font-bold text-white" title={recognitionNotice.subjectName}>
+                  {recognitionNotice.subjectName}
+                </p>
+                <p className="mt-0.5 font-mono text-[9px] text-slate-300">
+                  {Math.round(recognitionNotice.confidence * 100)}% MATCH
+                </p>
+              </div>
+              <Volume2 className="ml-auto h-3.5 w-3.5 shrink-0 text-cyan-300/80" aria-hidden="true" />
+            </div>
+          )}
+
+          {liveAlert && (
+            <div
+              role="alert"
+              className="absolute bottom-3 left-3 z-20 flex max-w-[calc(100%-1.5rem)] items-center gap-2 rounded-lg border border-amber-400/50 bg-amber-950/80 px-3 py-2 text-xs font-semibold text-amber-100 shadow-lg backdrop-blur-md sm:bottom-4 sm:left-4"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-300" />
+              <span className="truncate">{liveAlert}</span>
+            </div>
+          )}
+
           {!(videoElementRef.current && videoElementRef.current.readyState >= 2 && videoElementRef.current.videoWidth > 0) && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-950/35 px-6 text-center">
               <div className="max-w-md rounded-2xl border border-slate-700/80 bg-slate-950/90 px-6 py-5 shadow-xl backdrop-blur-sm">
