@@ -3,11 +3,13 @@ import { DetectionObject, FaceProfile } from '../types';
 /**
  * Scene narration.
  *
- * Turns the raw detection list into a human sentence that says what is
- * actually on screen and, where recognition supplies it, who it is: the
- * person's saved name, their relationship role, where they are standing in
- * the frame, how far away, which way they are moving, and what they appear
- * to be doing.
+ * Turns the raw detection list into a human description of what is happening
+ * in the image: who is in it (saved name and relationship role when
+ * recognition supplies them), what else is in it, where in the frame each
+ * subject is, how far away, which way they are moving, and what they appear
+ * to be doing. Narration text deliberately never names the camera it came
+ * from — the same sentence must read naturally as a caption, a recording
+ * title, or a spoken summary regardless of which view produced it.
  */
 
 export interface SubjectNarration {
@@ -19,6 +21,8 @@ export interface SubjectNarration {
   identified: boolean;
   /** Relationship from the face profile, e.g. "family", "delivery courier". */
   role?: string;
+  /** What the subject appears to be doing, e.g. "walking briskly to the right". */
+  action: string;
   /** Full sentence fragment for this subject. */
   phrase: string;
   /** Short chip text for the subject pill list. */
@@ -43,7 +47,6 @@ export interface SceneNarration {
 }
 
 export interface SceneNarrationContext {
-  cameraName: string;
   faceProfiles?: FaceProfile[];
   nightVisionEnabled?: boolean;
   lightingCondition?: string;
@@ -89,9 +92,9 @@ export function describeFramePosition(bbox: [number, number, number, number]): s
 export function describeProximity(distanceMeters?: number, bbox?: [number, number, number, number]): string {
   const area = bbox ? bbox[2] * bbox[3] : 0;
   if (typeof distanceMeters === 'number' && distanceMeters > 0) {
-    if (distanceMeters < 1.5) return 'right up against the lens';
-    if (distanceMeters < 3) return `close to the camera, about ${distanceMeters.toFixed(1)} m away`;
-    if (distanceMeters < 8) return `about ${distanceMeters.toFixed(1)} m from the camera`;
+    if (distanceMeters < 1.5) return 'right up close';
+    if (distanceMeters < 3) return `close by, about ${distanceMeters.toFixed(1)} m away`;
+    if (distanceMeters < 8) return `about ${distanceMeters.toFixed(1)} m away`;
     return `far back, roughly ${Math.round(distanceMeters)} m away`;
   }
   if (area > 0.25) return 'filling much of the frame';
@@ -107,11 +110,44 @@ export function describeMovement(motionVector?: [number, number], speedMph?: num
   const speed = speedMph || 0;
   if (magnitude < 0.004 && speed < 0.4) return 'holding still';
   const parts: string[] = [];
-  if (Math.abs(vx) > Math.abs(vy) * 0.6) parts.push(vx > 0 ? 'right' : 'left');
+  if (Math.abs(vx) > Math.abs(vy) * 0.6) parts.push(vx > 0 ? 'to the right' : 'to the left');
   if (Math.abs(vy) > Math.abs(vx) * 0.6) parts.push(vy > 0 ? 'toward the camera' : 'away from the camera');
   const pace = speed > 6 ? 'running' : speed > 2.2 ? 'walking briskly' : 'moving slowly';
   const direction = parts.length ? ` ${parts.join(' and ')}` : '';
   return `${pace}${direction}`;
+}
+
+/**
+ * Merge posture and movement into one natural activity phrase: "standing
+ * still", "sitting still", "walking briskly to the right" — instead of the
+ * stilted "walking and walking briskly toward the camera".
+ */
+export function describeAction(posture?: string, movement?: string): string {
+  const pace = movement || '';
+  if (posture === 'walking') {
+    if (!pace || pace === 'holding still') return 'walking';
+    return pace.replace('moving slowly', 'walking slowly');
+  }
+  if (posture === 'standing' || posture === 'sitting') {
+    if (!pace || pace === 'holding still') return `${posture} still`;
+    return `${posture} and ${pace}`;
+  }
+  return pace || 'visible';
+}
+
+/**
+ * Activity phrase for a detection, aware of what kind of thing it is: people
+ * and animals walk, sit, and hold still; a stationary vehicle is "parked";
+ * plain objects simply are where they are.
+ */
+function actionFor(detection: DetectionObject, posture: string | undefined, movement: string | undefined): string {
+  if (detection.category === 'person' || detection.category === 'animal') {
+    return describeAction(posture, movement);
+  }
+  if (detection.category === 'car') {
+    return !movement || movement === 'holding still' ? 'parked' : movement;
+  }
+  return '';
 }
 
 function describeAppearance(detection: DetectionObject): string[] {
@@ -171,8 +207,12 @@ export function narrateSubject(detection: DetectionObject, profiles: FaceProfile
   const appearance = describeAppearance(detection);
 
   if (role) attributes.push(role);
-  if (posture) attributes.push(posture);
-  if (movement) attributes.push(movement);
+  if (detection.category === 'car') {
+    attributes.push(!movement || movement === 'holding still' ? 'parked' : movement);
+  } else {
+    if (posture) attributes.push(posture);
+    if (movement) attributes.push(movement);
+  }
   if (proximity) attributes.push(proximity);
   if (heading) attributes.push(heading);
   if (emotion) attributes.push(emotion);
@@ -185,9 +225,9 @@ export function narrateSubject(detection: DetectionObject, profiles: FaceProfile
   if (detection.threatLevel === 'critical') attributes.push('flagged critical');
   else if (detection.threatLevel === 'warning') attributes.push('flagged for review');
 
-  const action = [posture, movement].filter(Boolean).join(' and ') || 'present';
+  const action = actionFor(detection, posture, movement);
   const clause = [
-    `${who}${role ? ` (${role})` : ''} is ${action} in ${position}`,
+    `${who}${role ? ` (${role})` : ''}${action ? ` is ${action} in ` : ' is in '}${position}`,
     proximity,
     heading,
     emotion,
@@ -204,7 +244,7 @@ export function narrateSubject(detection: DetectionObject, profiles: FaceProfile
     .filter(Boolean)
     .join(' • ');
 
-  return { id: detection.id, who, identified, role, phrase: clause, chip, attributes };
+  return { id: detection.id, who, identified, role, action, phrase: clause, chip, attributes };
 }
 
 const IRREGULAR_PLURALS: Record<string, string> = { person: 'people', child: 'children', man: 'men', woman: 'women' };
@@ -252,7 +292,6 @@ function describeEnvironment(context: SceneNarrationContext): string {
 }
 
 export function narrateScene(detections: DetectionObject[], context: SceneNarrationContext): SceneNarration {
-  const camera = context.cameraName || 'Camera';
   const profiles = context.faceProfiles || [];
   const subjects = detections.map((detection) => narrateSubject(detection, profiles));
 
@@ -265,10 +304,9 @@ export function narrateScene(detections: DetectionObject[], context: SceneNarrat
   const environment = describeEnvironment(context);
 
   if (detections.length === 0) {
-    const empty = `${camera}: nothing is in view — no people, animals, or vehicles detected. ${environment}.`;
     return {
-      summary: `${camera}: view is clear, no people or animals on screen`,
-      detailed: empty,
+      summary: 'The view is clear — no people, animals, or vehicles in frame.',
+      detailed: `Nothing is in view — no people, animals, or vehicles detected. ${environment}.`,
       subjects,
       census: 'nothing detected',
       environment,
@@ -279,38 +317,36 @@ export function narrateScene(detections: DetectionObject[], context: SceneNarrat
   }
 
   const census = censusOf(detections);
-
-  // Headline: who is on screen takes priority over what.
-  const identities: string[] = [];
-  if (knownPeople.length) identities.push(knownPeople.join(' and '));
-  if (unknownPeopleCount > 0) {
-    identities.push(`${unknownPeopleCount} unidentified ${unknownPeopleCount === 1 ? 'person' : 'people'}`);
-  }
-
-  const animals = detections.filter((detection) => detection.category === 'animal');
-  const vehicles = detections.filter((detection) => detection.category === 'car');
   const packageObject = detections.find((detection) => PACKAGE_PATTERN.test(detection.label || ''));
   const courier = detections.find((detection) => DELIVERY_PATTERN.test(`${detection.label || ''} ${detection.nameTag || ''}`));
 
-  const headlineParts: string[] = [];
-  if (identities.length) headlineParts.push(`${identities.join(' plus ')} on screen`);
-  if (animals.length) {
-    headlineParts.push(
-      animals.map((animal) => animal.subjectName || animal.nameTag || animal.label || 'an animal').join(' and '),
-    );
-  }
-  if (vehicles.length) headlineParts.push(`${vehicles.length} ${vehicles.length === 1 ? 'vehicle' : 'vehicles'}`);
-  if (courier) headlineParts.push('a delivery courier');
-  if (packageObject) headlineParts.push('a package left in view');
-  if (!headlineParts.length) headlineParts.push(census);
+  // One short clause per subject describing what they are doing, e.g.
+  // "Dana (family member) is standing still in the centre of the frame".
+  const actionClause = (index: number) => {
+    const subject = subjects[index];
+    const detection = detections[index];
+    return `${subject.who}${subject.role ? ` (${subject.role})` : ''}${subject.action ? ` is ${subject.action} in ` : ' is in '}${describeFramePosition(detection.bbox)}`;
+  };
 
-  // Attach the most informative single action to the headline.
-  const lead = subjects[0];
-  const leadAction = lead ? lead.attributes.slice(0, 2).join(', ') : '';
-  const summary = `${camera}: ${headlineParts.join(', ')}${leadAction ? ` — ${lead.who} ${leadAction}` : ''}`;
+  // Summary is a genuine description of the scene, not a camera label:
+  // lead with what the subjects are doing, and only fall back to a census
+  // when the frame is too crowded to enumerate.
+  const summaryParts: string[] = [];
+  if (subjects.length <= 3) {
+    summaryParts.push(...subjects.map((_, index) => actionClause(index)));
+  } else {
+    summaryParts.push(`the view shows ${census}`);
+    summaryParts.push(actionClause(0), actionClause(1));
+  }
+  if (courier && packageObject) summaryParts.push('a delivery appears to be in progress');
+  else if (courier) summaryParts.push('a delivery courier is in view');
+  // When the package itself already got a subject clause above, saying it
+  // again as an interpretation would be redundant.
+  else if (packageObject && subjects.length > 3) summaryParts.push('a package has been left in view');
+  const summary = `${sentence(summaryParts.join('; '))}.`;
 
   const detailed = [
-    `${camera} sees ${census}.`,
+    `The view shows ${census}.`,
     ...subjects.map((subject) => `${sentence(subject.phrase)}.`),
     `${environment}.`,
   ].join(' ');

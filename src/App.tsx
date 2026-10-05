@@ -1207,11 +1207,10 @@ export function App() {
   const sceneNarration = useMemo(
     () =>
       narrateScene(detectedObjects, {
-        cameraName: activeCamera.name,
         faceProfiles,
         nightVisionEnabled: nightVision.enabled,
       }),
-    [detectedObjects, activeCamera.name, faceProfiles, nightVision.enabled],
+    [detectedObjects, faceProfiles, nightVision.enabled],
   );
 
   const buildSceneDescription = () => sceneNarration.detailed;
@@ -1255,7 +1254,9 @@ export function App() {
         const sceneDescription = recordingSceneDescription.trim() || buildSceneDescription();
         const newRec: SavedRecording = {
           id: `rec-${Date.now()}`,
-          title: sceneDescription,
+          // The short action summary makes a readable clip title; the full
+          // multi-sentence description is kept alongside it.
+          title: recordingSceneDescription.trim() || liveSceneDetails,
           sceneDescription,
           timestamp: Date.now(),
           durationSeconds: Math.max(1, recordingSeconds),
