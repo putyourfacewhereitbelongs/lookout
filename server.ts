@@ -132,18 +132,17 @@ app.post('/api/recognition/recognize', async (req, res) => {
 
     // Gateway-level filtering: the client sends its own confidence floor
     // (clamped to a sane band here), so the detector never returns boxes the
-    // client would immediately discard. Keep the provider request limited to
-    // the core recognition response. Landmarks are optional in the client
-    // gate, and asking older CompreFace services for the landmarks plugin can
-    // make the entire request fail instead of returning an otherwise valid
-    // face detection. `status=false` keeps the payload minimal.
+    // client would immediately discard. Request landmarks so the client can
+    // reject heavily turned or rolled faces while retaining the compatibility
+    // fallback below for older CompreFace gateways. `status=false` keeps the
+    // payload minimal.
     const requestedThreshold =
       typeof detProbThreshold === 'number' && Number.isFinite(detProbThreshold)
         ? Math.min(0.95, Math.max(0.5, detProbThreshold))
         : null;
     const detectorThreshold = requestedThreshold ?? (isDistantScan ? 0.93 : 0.82);
     const targetUrls = [
-      comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&status=false`),
+      comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&face_plugins=landmarks&status=false`),
       // Some older CompreFace gateways reject one or both optional query
       // parameters. Retry the core endpoint so a gateway quirk cannot turn a
       // valid camera frame into an apparent "no faces" result.
