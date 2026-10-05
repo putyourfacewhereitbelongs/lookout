@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Users,
   UserCheck,
@@ -19,8 +19,10 @@ import {
   RefreshCw,
   Cpu,
   Key,
+  Activity,
 } from 'lucide-react';
 import { FaceProfile, StoragePreferences } from '../../types';
+import { recognitionDiagnostics, RecognitionActivity } from '../../services/recognitionDiagnostics';
 import { StorageService } from '../../services/db';
 import { faceRecognitionService } from '../../services/faceRecognitionService';
 
@@ -51,6 +53,15 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<FaceProfile | null>(null);
+  const [activity, setActivity] = useState<RecognitionActivity>(() => recognitionDiagnostics.getActivity());
+
+  useEffect(() => {
+    const unsubscribe = recognitionDiagnostics.subscribe(setActivity);
+    // The subscription covers pipeline events; the poll keeps the timestamp
+    // fresh even when nothing is being detected.
+    const poll = window.setInterval(() => setActivity(recognitionDiagnostics.getActivity()), 1000);
+    return () => { unsubscribe(); window.clearInterval(poll); };
+  }, []);
 
   // New profile form state
   const [newName, setNewName] = useState('');
@@ -403,6 +414,8 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
           </div>
           <p className="text-[10px] text-slate-400">
             Minimum visual embedding similarity required to confirm a face matches a known profile.
+            Applies live across the whole range: on-screen naming uses this value directly, while
+            alerts and DVR events always ask for slightly more.
           </p>
           <input
             type="range"
@@ -465,6 +478,90 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
             </label>
           </div>
         </div>
+      </div>
+
+      {/* Live Recognition Activity: makes every pipeline gate observable so
+          "why wasn't I recognized" has a visible answer. */}
+      <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 space-y-3 font-mono text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Activity className="w-4 h-4 text-cyan-400" />
+            <span className="font-bold uppercase tracking-wider text-white text-xs">
+              Live Recognition Activity
+            </span>
+          </div>
+          <span className="text-[10px] text-slate-500">
+            THIS SESSION · {activity.cycles} SCAN{activity.cycles === 1 ? '' : 'S'}
+            {activity.lastCycleAt ? ` · LAST ${new Date(activity.lastCycleAt).toLocaleTimeString()}` : ' · NOT RUNNING YET'}
+          </span>
+        </div>
+
+        {!storagePreferences.facialRecognitionMasterEnabled ? (
+          <p className="text-[11px] text-amber-300">
+            The AI matcher is switched off above, so no recognition scans are running at all.
+          </p>
+        ) : !activity.gates ? (
+          <p className="text-[11px] text-slate-400">
+            No recognition scan has completed yet. Wait a few seconds with a camera feed active.
+          </p>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-1.5">
+              <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${activity.gates.peopleEnabled ? 'bg-emerald-950 border-emerald-800 text-emerald-300' : 'bg-red-950 border-red-800 text-red-300'}`}>
+                PEOPLE {activity.gates.peopleEnabled ? 'ON' : 'OFF'}
+              </span>
+              <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${activity.gates.animalsEnabled ? 'bg-emerald-950 border-emerald-800 text-emerald-300' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>
+                PETS {activity.gates.animalsEnabled ? 'ON' : 'OFF'}
+              </span>
+              <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-[10px]">
+                FLOOR {Math.round(activity.gates.confidenceFloor * 100)}%
+              </span>
+              <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-[10px]">
+                ZONE {activity.gates.detectionZone === 'full_frame' ? 'FULL FRAME' : activity.gates.detectionZone === 'central_zone' ? 'CENTER' : 'PERIMETER'}
+              </span>
+              <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-[10px]">
+                NAMING ≥ {Math.round(activity.gates.namingThreshold * 100)}%
+              </span>
+              <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-[10px]">
+                ALERTS ≥ {Math.round(activity.gates.alertThreshold * 100)}%
+              </span>
+              <span className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-300 text-[10px]">
+                CONFIRM {activity.gates.confirmationScans} SCAN{activity.gates.confirmationScans === 1 ? '' : 'S'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {[
+                { label: 'FACES SEEN', value: activity.facesSeen, hint: 'reached the pipeline' },
+                { label: 'CONFIRMED', value: activity.confirmedFaces, hint: 'passed confirmation scans' },
+                { label: 'NAMED', value: activity.namedOnHud, hint: 'name shown on the HUD' },
+                { label: 'IDENTIFIED', value: activity.identifiedFaces, hint: 'passed the alert gate' },
+                { label: 'UNKNOWN REPORTS', value: activity.unknownPersonReports, hint: 'unidentified person alerts' },
+                { label: 'BELOW FLOOR', value: activity.droppedBelowFloor, hint: 'dropped by confidence floor' },
+                { label: 'OUTSIDE ZONE', value: activity.droppedOutsideZone, hint: 'dropped by monitored zone' },
+                { label: 'STILL SKIPS', value: activity.stillSceneSkips, hint: 'scans skipped — scene static, no motion' },
+                { label: 'GRAY CONFIRMS', value: activity.grayZoneConfirmations, hint: 'gray-zone names confirmed by consecutive scans' },
+                { label: 'NEGATIVE DROPS', value: activity.negativeProfileMatches, hint: 'matched a negative/noise profile (e.g. Background_Noise)' },
+                { label: 'SCAN ERRORS', value: activity.recognitionErrors, hint: 'failed recognition requests' },
+              ].map((item) => (
+                <div key={item.label} className="p-2 rounded-lg bg-slate-900 border border-slate-800" title={item.hint}>
+                  <div className="text-[9px] text-slate-500 font-bold uppercase">{item.label}</div>
+                  <div className="text-lg font-bold text-white leading-tight">{item.value}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="text-[10px] text-slate-500 leading-relaxed border-t border-slate-800/80 pt-2">
+              Faces seen but never confirmed? Raise sensitivity (fewer confirmation scans) in AI Detection
+              Sensitivities. Named but not announced? Alerts require a little more similarity than naming —
+              lower the similarity match threshold above. Nothing at all? Check the PEOPLE gate and the
+              confidence floor, and confirm the CompreFace status at the top of this panel.
+              {activity.implausibleBoxesSuppressed > 0 && ` Noise gate filtered ${activity.implausibleBoxesSuppressed} implausible box(es).`}
+              {activity.stillSceneSkips > 0 && ` Skipped ${activity.stillSceneSkips} scan(s) because the scene was still (frames are only sent on motion, with a slow heartbeat).`}
+              {activity.petCandidateScans > 0 && ` Pet candidates: ${activity.petCandidateScans} scan(s), ${activity.petConfirmedScans} confirmed.`}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Filter and Search Bar */}
@@ -679,6 +776,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
                       <img key={idx} src={url} alt="Avatar option" onClick={() => setNewAvatar(url)} className={`w-10 h-10 rounded-lg object-cover cursor-pointer border-2 shrink-0 ${newAvatar === url ? 'border-cyan-400 ring-1 ring-cyan-400 scale-105' : 'border-transparent opacity-60 hover:opacity-100'}`} />
                     ))}
                   </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Face enrollment happens from live captures in the Face Album. Use head-and-shoulders photos there — tightly cropped faces match poorly, and photos that keep falsely matching can be enrolled as a negative profile (e.g. <span className="text-slate-400">Background_Noise</span>) which the app ignores.</p>
                 </div>
               )}
 

@@ -41,7 +41,9 @@ export const DEFAULT_SENSITIVITIES: DetectionSensitivities = {
   },
   people: {
     enabled: true,
-    sensitivity: 90,
+    // 70 maps to three consecutive confirmation scans, the shipped default
+    // behavior of the face presence gate.
+    sensitivity: 70,
     confidenceThreshold: 0.60,
     highlightColor: '#ef4444',
     triggerAlert: true,

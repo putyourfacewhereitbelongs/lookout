@@ -106,11 +106,43 @@ Hovering a card pauses its countdown, `Esc` clears the stack, and repeated sight
 | Quiet hours | Keep the cards visible while muting tones and speech |
 | Send a test face notification | Preview exactly how an identification looks and sounds |
 
+## Detection sensitivities
+
+**Settings -> AI Detection Sensitivities** drives the live pipeline directly. Nothing in that panel is decorative:
+
+| Control | Effect |
+| --- | --- |
+| People & Intruders | Master gate for the face pipeline: detection confidence floor, monitored zone, consecutive-scan confirmation, identity/unknown-person alerts, and the face-triggered DVR |
+| Threats & Perimeter Breach | Gates intruder-identification and rapid-approach alerts |
+| Animals & Pets | Gates local pet recognition and its alerts |
+| Vehicles / Objects | No detector of these kinds is bundled; the switches gate the delivery-activity notifier for vehicle- and package-like labels |
+| Weather | Reserved; no bundled detector |
+| Fixed camera false-positive guard | Pauses detections briefly when most of the image shifts together (fixed cameras only) |
+
+The detection sensitivity slider maps to how many consecutive scans must confirm a face (one scan at 100%, six at the lowest setting), and the confidence slider raises the detector probability floor above the built-in 82% false-positive guard. Each category also owns its alert switch, audible chime, monitored zone, and HUD bounding-box color, and the panel shows the derived values live.
+
+The **Face Database similarity match threshold** (85–99%) is honored across its full range: on-screen naming uses the exact value, and alert-level identification requires a small step above it — capped at the shipped 97% strictness, so raising the slider never makes alerts harder than they were before the slider was live.
+
+**Settings -> Face Database -> Live Recognition Activity** shows, in real time, every stage a face passes or fails: how many faces were seen, how many were dropped by the confidence floor or monitored zone, how many were confirmed, named, and identified, how many scans were skipped because the scene was still, plus the exact gates in effect and any recognition request errors. It is the first place to look when someone "used to be recognized" and no longer is.
+
+## Recognition efficiency and false-positive hardening
+
+The live recognition cycle is tuned so that recognizer load, CPU, and false alerts stay proportional to actual activity:
+
+- **Motion-gated sending.** A tiny 32×18 grayscale sample of the camera frame decides whether anything moved. Still scenes send nothing at all — just one heartbeat frame about every 5 seconds keeps presence tracks fresh — and real motion instantly resumes scanning at full rate (at most one frame per ~0.6 s on desktop, ~0.9 s on phones).
+- **Gateway-level filtering.** The app's own confidence floor is forwarded as CompreFace's `det_prob_threshold`, so the detector never returns boxes the app would immediately discard. `status=false` keeps responses minimal and `face_plugins=landmarks` requests the 5-point landmarks.
+- **Landmark geometry gate.** Detections whose landmarks show a heavy head roll (> ~20°), a hard profile turn (nose-to-eye distance ratio above ~2.2), or vertical nonsense are dropped before any identity work — off-axis faces are the classic source of wrong-name matches.
+- **Minimum live face size.** Live faces below ~60 px are not trusted for recognition; small, blurry faces mismatch against crisp reference photos. Distant faces still work through the enlarged long-range tiles, where the floor applies in upscaled tile pixels (~30 px in the source frame).
+- **Dual-threshold gray zone.** A match at or above the alert threshold is accepted immediately. Matches between the naming and alert thresholds are held until the same tracked face agrees on the same subject for three consecutive scans; an identity change, a score drop, or a long gap resets the streak. A second inference pass on the same frame used to guard this zone and has been removed — temporal agreement does the job without doubling request load.
+- **Byte-budgeted frames.** Every image sent to CompreFace — the live snapshot and each long-range tile — is JPEG-encoded within ~100 KB (quality ladder first, then a mild downscale whose exact dimensions are reported back so box coordinates stay truthful).
+- **Negative/noise profiles.** Enroll a CompreFace subject named `Background_Noise` (or `unknown_classifiers`, `negative_samples`, `do_not_match`, `ignore_face`) using photos of whatever keeps getting falsely identified — a poster, a reflection, a photo on the wall. Detections matching it are dropped entirely: no identity, no unknown-person alert, no face-album entry.
+- **Reference-photo guidance.** Unknown-face album captures are padded well beyond the face box (head and shoulders, not a tight crop), and enrollment validates that reference photos are at least 200×200 px with a sane portrait shape before registering them.
+
 ## Low-CPU recognition mode
 
-Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends a compact 640-pixel JPEG to CompreFace one request at a time and renders overlays at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.
+Lookout is intentionally focused on face recognition. Camera audio capture, transcription, acoustic analysis, local scene models, semantic segmentation, and general object detection are not started or bundled. The live pipeline sends at most one budget-sized JPEG (~100 KB, up to 1280 px wide) to CompreFace per scan — and none at all while the scene is still — while overlays render at 30 fps, leaving CPU time available for identity matching. The manual **CompreFace scan** retains an optional long-range tiled scan for difficult frames.
 
-The bundled CompreFace defaults use one ML worker and reduced Java heap limits. Override `COMPREFACE_UWSGI_PROCESSES`, `COMPREFACE_API_JAVA_OPTS`, or `COMPREFACE_ADMIN_JAVA_OPTS` only on machines with more CPU and memory.
+The bundled CompreFace defaults use one ML worker and reduced Java heap limits (API `-Xmx1g`, Admin `-Xmx512m`). Override `COMPREFACE_UWSGI_PROCESSES`, `COMPREFACE_API_JAVA_OPTS`, or `COMPREFACE_ADMIN_JAVA_OPTS` only on machines with more CPU and memory.
 
 ## Local development without the Lookout container
 

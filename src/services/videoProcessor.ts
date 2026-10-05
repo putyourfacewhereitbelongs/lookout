@@ -4,8 +4,10 @@ import {
   RedSilhouetteSettings,
   VideoProcessingSettings,
   AccessibilitySettings,
+  DetectionSensitivities,
   LatencyMetrics,
 } from '../types';
+import { isHexColor } from './detectionSettings';
 
 export class VideoProcessor {
   private offscreenCanvas: HTMLCanvasElement;
@@ -31,6 +33,7 @@ export class VideoProcessor {
     redSilhouette: RedSilhouetteSettings,
     videoProcessing: VideoProcessingSettings,
     accessibility: AccessibilitySettings,
+    detectionSensitivities?: DetectionSensitivities,
     onMetricsUpdate?: (metrics: LatencyMetrics) => void
   ): void {
     if (!this.displayCanvas) return;
@@ -39,9 +42,9 @@ export class VideoProcessor {
     if (!ctx) return;
 
     if (!video || (video instanceof HTMLVideoElement && video.readyState < 2)) {
-      this.drawStandbyScene(ctx, canvas.width, canvas.height, camera, detections);
+      this.drawStandbyScene(ctx, canvas.width, canvas.height, camera, detections, detectionSensitivities);
     } else {
-      this.processFrame(video, canvas, detections, nightVision, redSilhouette, videoProcessing, accessibility, onMetricsUpdate);
+      this.processFrame(video, canvas, detections, nightVision, redSilhouette, videoProcessing, accessibility, detectionSensitivities, onMetricsUpdate);
     }
   }
 
@@ -50,7 +53,8 @@ export class VideoProcessor {
     width: number,
     height: number,
     camera: any,
-    detections: DetectionObject[]
+    detections: DetectionObject[],
+    detectionSensitivities?: DetectionSensitivities
   ) {
     ctx.save();
     // Plain standby background; recognition boxes are the only stream overlays.
@@ -59,7 +63,7 @@ export class VideoProcessor {
 
     // If real detections exist, render them
     if (detections.length > 0) {
-      this.renderTrackingHUD(ctx, width, height, detections);
+      this.renderTrackingHUD(ctx, width, height, detections, detectionSensitivities);
     }
 
     ctx.restore();
@@ -74,6 +78,7 @@ export class VideoProcessor {
     redSilhouette: RedSilhouetteSettings,
     videoProcessing: VideoProcessingSettings,
     accessibility: AccessibilitySettings,
+    detectionSensitivities?: DetectionSensitivities,
     onMetricsUpdate?: (metrics: LatencyMetrics) => void
   ): void {
     const startTime = performance.now();
@@ -143,7 +148,7 @@ export class VideoProcessor {
     }
 
     // Render recognized people, animals, and objects.
-    this.renderTrackingHUD(ctx, width, height, detections);
+    this.renderTrackingHUD(ctx, width, height, detections, detectionSensitivities);
 
     ctx.restore();
 
@@ -464,12 +469,31 @@ export class VideoProcessor {
     ctx.restore();
   }
 
+  /**
+   * HUD color for a detection. The per-category highlight color chosen in
+   * Settings -> AI Detection Sensitivities wins; without settings the
+   * built-in category palette is used so behavior is unchanged.
+   */
+  private detectionColor(item: DetectionObject, sensitivities?: DetectionSensitivities): string {
+    if (sensitivities) {
+      const category = item.category === 'person' ? sensitivities.people
+        : item.category === 'animal' ? sensitivities.animals
+        : item.category === 'car' ? sensitivities.cars
+        : item.category === 'threat' ? sensitivities.threats
+        : item.category === 'weather' ? sensitivities.weather
+        : sensitivities.objects;
+      if (isHexColor(category?.highlightColor)) return category.highlightColor;
+    }
+    return item.category === 'person' ? '#ef4444' : item.category === 'animal' ? '#3b82f6' : item.isKnown ? '#38bdf8' : item.category === 'car' ? '#a855f7' : '#06b6d4';
+  }
+
   // Draw only recognition boxes and labels over the camera image.
   private renderTrackingHUD(
     ctx: CanvasRenderingContext2D,
     width: number,
     height: number,
-    detections: DetectionObject[]
+    detections: DetectionObject[],
+    detectionSensitivities?: DetectionSensitivities
   ) {
     ctx.save();
     detections.forEach((item) => {
@@ -478,7 +502,7 @@ export class VideoProcessor {
       const y = Math.floor(by * height);
       const w = Math.floor(bw * width);
       const h = Math.floor(bh * height);
-      const color = item.category === 'person' ? '#ef4444' : item.category === 'animal' ? '#3b82f6' : item.isKnown ? '#38bdf8' : item.category === 'car' ? '#a855f7' : '#06b6d4';
+      const color = this.detectionColor(item, detectionSensitivities);
       // Keep the rich recognition label visible: name, estimated age, emotion,
       // and the body-state estimate.
       const postureLabel = item.posture && item.posture !== 'unknown' ? ` • ${item.posture.toUpperCase()}` : '';

@@ -37,8 +37,73 @@ const MAX_ASPECT_RATIO = 1.9;
 /** A box smaller than this fraction of the frame edge is noise, not a face. */
 const MIN_RELATIVE_EDGE = 0.012;
 
+/**
+ * Hard absolute floor for the smallest face edge (in pixels of the submitted
+ * image) that may drive recognition. Below roughly 60 px a live face has too
+ * little detail to embed reliably and mismatches against crisp reference
+ * photos, so it is not trusted for identity at all. The long-range tiles are
+ * upscaled ~2x before submission, so this floor applies in tile coordinates
+ * there — a ~30 px source face still gets its chance through the tiled pass.
+ */
+export const MIN_ABSOLUTE_FACE_EDGE = 60;
+
 /** A single face cannot sensibly cover almost the whole frame. */
 const MAX_RELATIVE_AREA = 0.92;
+
+// --- Landmark geometry -----------------------------------------------------
+//
+// CompreFace is asked for the 5-point landmarks plugin (eyes, nose, mouth
+// corners). Embeddings degrade quickly once a face is turned or tilted far
+// off-frontal, and those frames are exactly where false names come from, so
+// such boxes are dropped before any identity work happens.
+
+/** Head roll (eye line vs. horizontal) beyond which a match is not trusted. */
+export const MAX_FACE_ROLL_DEGREES = 20;
+
+/**
+ * Largest tolerable nose-to-eye distance imbalance. Near-frontal faces sit
+ * the nose at a comparable distance from both eyes; a hard profile turn
+ * skews the ratio towards 2 and beyond.
+ */
+export const MAX_PROFILE_EYE_NOSE_RATIO = 2.2;
+
+/**
+ * Geometry check on the 5-point landmarks. Returns true (plausible) whenever
+ * landmarks are absent or too small to reason about — providers that do not
+ * return the plugin must not lose recognition entirely — and rejects heavy
+ * roll, hard profile turns, and vertical nonsense (nose above the eyes,
+ * mouth above the nose).
+ */
+export function landmarkGeometryPlausible(landmarks?: [number, number][] | null): boolean {
+  if (!Array.isArray(landmarks) || landmarks.length < 5) return true;
+  const [leftEye, rightEye, nose, mouthA, mouthB] = landmarks;
+  if (!leftEye || !rightEye || !nose) return true;
+
+  const eyeDx = Math.abs(rightEye[0] - leftEye[0]);
+  const eyeDy = Math.abs(rightEye[1] - leftEye[1]);
+  const eyeDistance = Math.hypot(eyeDx, eyeDy);
+  // Landmarks on a tiny face are pixel noise; skip the check rather than
+  // reject a real (already size-gated) face.
+  if (eyeDistance < 4) return true;
+
+  const rollDegrees = (Math.atan2(eyeDy, Math.max(eyeDx, 0.001)) * 180) / Math.PI;
+  if (rollDegrees > MAX_FACE_ROLL_DEGREES) return false;
+
+  const leftNoseDistance = Math.hypot(nose[0] - leftEye[0], nose[1] - leftEye[1]);
+  const rightNoseDistance = Math.hypot(nose[0] - rightEye[0], nose[1] - rightEye[1]);
+  const profileRatio =
+    Math.max(leftNoseDistance, rightNoseDistance) / Math.max(Math.min(leftNoseDistance, rightNoseDistance), 0.001);
+  if (profileRatio > MAX_PROFILE_EYE_NOSE_RATIO) return false;
+
+  // Vertical sanity with a little slack for detector jitter: the nose must
+  // sit below the eye line and the mouth below the nose.
+  const slack = eyeDistance * 0.05;
+  const eyeMidY = (leftEye[1] + rightEye[1]) / 2;
+  if (nose[1] < eyeMidY - slack) return false;
+  if (mouthA && mouthB && (mouthA[1] + mouthB[1]) / 2 < nose[1] - slack) return false;
+
+  return true;
+}
 
 export interface BoxGeometry {
   width: number;
@@ -81,8 +146,13 @@ export function isPlausibleFace(
   if (aspectRatio < MIN_ASPECT_RATIO || aspectRatio > MAX_ASPECT_RATIO) return false;
   if (relativeArea > MAX_RELATIVE_AREA) return false;
 
-  const minEdge = Math.min(frameWidth, frameHeight) * MIN_RELATIVE_EDGE;
+  const minEdge = Math.max(
+    Math.min(frameWidth, frameHeight) * MIN_RELATIVE_EDGE,
+    MIN_ABSOLUTE_FACE_EDGE,
+  );
   if (Math.min(width, height) < minEdge) return false;
+
+  if (!landmarkGeometryPlausible(detection.landmarks)) return false;
 
   // A box escaping the frame by a wide margin is a mapping artefact, most
   // often from the tiled long-range pass.
@@ -142,12 +212,26 @@ export class FacePresenceTracker {
 
   constructor(
     /** Consecutive scans a new face must appear in before being reported. */
-    private readonly framesToConfirm = 3,
+    private framesToConfirm = 3,
     /** Scans a confirmed face may be missing before it is dropped. */
-    private readonly framesToDrop = 3,
+    private framesToDrop = 3,
     /** Association radius as a fraction of the face's own size. */
     private readonly associationFactor = 1.4,
   ) {}
+
+  /**
+   * Re-tune the confirmation strictness while running. The People sensitivity
+   * slider maps onto framesToConfirm, so raising or lowering the setting takes
+   * effect on the next scan instead of requiring a tracker restart.
+   */
+  configure(options: { framesToConfirm?: number; framesToDrop?: number }): void {
+    if (Number.isFinite(options?.framesToConfirm)) {
+      this.framesToConfirm = Math.max(1, Math.round(options.framesToConfirm as number));
+    }
+    if (Number.isFinite(options?.framesToDrop)) {
+      this.framesToDrop = Math.max(1, Math.round(options.framesToDrop as number));
+    }
+  }
 
   reset(): void {
     this.candidates = [];
@@ -196,8 +280,13 @@ export class FacePresenceTracker {
         if (track.confirmed) confirmed.push(detection);
         else pendingCount++;
       } else {
-        this.candidates.push({ cx, cy, size, hits: 1, misses: 0, confirmed: false, lastSeen: now });
-        pendingCount++;
+        // A brand-new track can confirm immediately when the configured
+        // strictness is a single scan (maximum sensitivity).
+        const candidate: TrackedCandidate = { cx, cy, size, hits: 1, misses: 0, confirmed: false, lastSeen: now };
+        if (candidate.hits >= this.framesToConfirm) candidate.confirmed = true;
+        this.candidates.push(candidate);
+        if (candidate.confirmed) confirmed.push(detection);
+        else pendingCount++;
       }
     });
 
@@ -216,5 +305,61 @@ export class FacePresenceTracker {
       facePresent: this.candidates.some((candidate) => candidate.confirmed),
       pendingCount,
     };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Gray-zone identity confirmation
+// ---------------------------------------------------------------------------
+
+/**
+ * Dual-threshold identity confirmation.
+ *
+ * A match at or above the alert threshold is accepted immediately. Matches
+ * that clear the naming threshold but not the alert threshold fall into a
+ * gray zone: they are held until the same tracked face agrees on the same
+ * subject for several consecutive scans. Any identity change, a drop below
+ * the naming threshold, or a gap longer than `windowMs` resets the streak —
+ * a gray-zone identity may never be confirmed by scattered, disagreeing, or
+ * stale sightings.
+ */
+export class IdentityConfirmer {
+  private tracks = new Map<string, { subject: string; streak: number; lastSeen: number }>();
+
+  constructor(
+    /** Consecutive agreeing scans required to confirm a gray-zone identity. */
+    private readonly requiredStreak = 3,
+    /** A gap longer than this between sightings resets the streak. */
+    private readonly windowMs = 10_000,
+  ) {}
+
+  /**
+   * Feed the strongest subject seen for one tracked face this scan. Pass
+   * `null` when the face had no candidate at/above the naming threshold.
+   */
+  observe(trackKey: string, subject: string | null, now = Date.now()): void {
+    if (!subject) {
+      this.tracks.delete(trackKey);
+      return;
+    }
+    const previous = this.tracks.get(trackKey);
+    if (previous && previous.subject === subject && now - previous.lastSeen <= this.windowMs) {
+      previous.streak += 1;
+      previous.lastSeen = now;
+    } else {
+      this.tracks.set(trackKey, { subject, streak: 1, lastSeen: now });
+    }
+  }
+
+  /** True when this track has agreed on `subject` for enough consecutive scans. */
+  isConfirmed(trackKey: string, subject: string, now = Date.now()): boolean {
+    const track = this.tracks.get(trackKey);
+    return Boolean(
+      track && track.subject === subject && track.streak >= this.requiredStreak && now - track.lastSeen <= this.windowMs,
+    );
+  }
+
+  reset(): void {
+    this.tracks.clear();
   }
 }

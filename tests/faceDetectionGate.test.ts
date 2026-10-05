@@ -4,6 +4,9 @@ import {
   isPlausibleFace,
   filterImplausibleFaces,
   FacePresenceTracker,
+  IdentityConfirmer,
+  landmarkGeometryPlausible,
+  MIN_ABSOLUTE_FACE_EDGE,
   MIN_FACE_PROBABILITY,
   MIN_DISTANT_FACE_PROBABILITY,
 } from '../src/services/faceDetectionGate';
@@ -175,4 +178,136 @@ test('end to end: a noisy empty scene produces no face presence', () => {
   }
 
   assert.equal(everPresent, false, 'an empty scene must never announce a face');
+});
+
+// --- runtime reconfiguration ------------------------------------------------
+
+test('configure() retunes confirmation strictness on the next scan', () => {
+  const tracker = new FacePresenceTracker();
+  const face = box(100, 100, 80);
+  let result = tracker.update([face]);
+  assert.equal(result.facePresent, false);
+
+  // Low sensitivity now demands four agreeing scans.
+  tracker.configure({ framesToConfirm: 4 });
+  result = tracker.update([face]);
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, false, 'three scans must not confirm when four are required');
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, true, 'the fourth scan confirms');
+
+  // High sensitivity confirms a new track on the very next scan.
+  tracker.reset();
+  tracker.configure({ framesToConfirm: 1 });
+  result = tracker.update([face]);
+  assert.equal(result.facePresent, true);
+});
+
+// --- absolute minimum live face size ----------------------------------------
+
+test('a live face smaller than the absolute floor is not trusted for recognition', () => {
+  // Small, blurry live faces mismatch against crisp reference photos, so a
+  // sub-60px box is rejected outright on the standard pass.
+  assert.equal(isPlausibleFace(box(100, 100, MIN_ABSOLUTE_FACE_EDGE - 15, 0.99), FRAME_W, FRAME_H), false);
+  assert.equal(isPlausibleFace(box(100, 100, MIN_ABSOLUTE_FACE_EDGE + 5, 0.99), FRAME_W, FRAME_H), true);
+});
+
+test('the absolute floor applies in upscaled tile coordinates so distant faces still pass through tiles', () => {
+  // Long-range tiles are enlarged ~2x before submission, so the floor is in
+  // tile pixels: a ~30px source face upscaled to 60px+ still gets its chance.
+  const tileW = 1180;
+  const tileH = 892;
+  assert.equal(isPlausibleFace(box(100, 100, 40, 0.95), tileW, tileH, 'distant'), false);
+  assert.equal(isPlausibleFace(box(100, 100, 60, 0.95), tileW, tileH, 'distant'), true);
+});
+
+// --- landmark geometry -------------------------------------------------------
+
+const FRONTAL_LANDMARKS: [number, number][] = [[140, 150], [250, 151], [195, 190], [155, 230], [235, 230]];
+
+test('a frontal face passes the landmark geometry check', () => {
+  assert.equal(landmarkGeometryPlausible(FRONTAL_LANDMARKS), true);
+});
+
+test('a heavily rolled head is rejected', () => {
+  // Eye line tilted ~24 degrees off horizontal.
+  const rolled: [number, number][] = [[140, 130], [230, 170], [185, 200], [150, 240], [220, 250]];
+  assert.equal(landmarkGeometryPlausible(rolled), false);
+  assert.equal(isPlausibleFace({ ...box(100, 100, 200), landmarks: rolled }, FRAME_W, FRAME_H), false);
+});
+
+test('a hard profile turn is rejected by the nose-to-eye imbalance', () => {
+  // Nose pulled almost onto one eye: ratio ~2.4 between eye-to-nose distances.
+  const profile: [number, number][] = [[140, 150], [250, 151], [230, 185], [160, 230], [240, 230]];
+  assert.equal(landmarkGeometryPlausible(profile), false);
+});
+
+test('vertical nonsense (nose above the eyes) is rejected', () => {
+  const upsideDown: [number, number][] = [[140, 200], [250, 201], [195, 120], [155, 90], [235, 90]];
+  assert.equal(landmarkGeometryPlausible(upsideDown), false);
+});
+
+test('missing or partial landmarks never block a face', () => {
+  // Providers without the landmarks plugin must not lose recognition.
+  assert.equal(landmarkGeometryPlausible(undefined), true);
+  assert.equal(landmarkGeometryPlausible(null), true);
+  assert.equal(landmarkGeometryPlausible([[140, 150]]), true);
+});
+
+// --- gray-zone identity confirmation -----------------------------------------
+
+test('a gray-zone identity confirms only after consecutive agreeing scans', () => {
+  const confirmer = new IdentityConfirmer(3);
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), false);
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), false);
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), true);
+});
+
+test('an identity change resets the gray-zone streak', () => {
+  const confirmer = new IdentityConfirmer(3);
+  confirmer.observe('track-1', 'Alex');
+  confirmer.observe('track-1', 'Alex');
+  confirmer.observe('track-1', 'Bea'); // disagreement restarts confirmation
+  assert.equal(confirmer.isConfirmed('track-1', 'Bea'), false);
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), false);
+  confirmer.observe('track-1', 'Bea');
+  confirmer.observe('track-1', 'Bea');
+  assert.equal(confirmer.isConfirmed('track-1', 'Bea'), true);
+});
+
+test('a scan below the naming bar resets the streak', () => {
+  const confirmer = new IdentityConfirmer(3);
+  confirmer.observe('track-1', 'Alex');
+  confirmer.observe('track-1', 'Alex');
+  confirmer.observe('track-1', null); // dropped below the naming threshold
+  confirmer.observe('track-1', 'Alex');
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), false);
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), true);
+});
+
+test('a stale streak expires instead of confirming from old sightings', () => {
+  const confirmer = new IdentityConfirmer(3, 10_000);
+  confirmer.observe('track-1', 'Alex', 0);
+  confirmer.observe('track-1', 'Alex', 6_000);
+  confirmer.observe('track-1', 'Alex', 12_000);
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex', 12_000), true);
+  // A gap longer than the window restarts the streak.
+  const other = new IdentityConfirmer(3, 10_000);
+  other.observe('track-2', 'Alex', 0);
+  other.observe('track-2', 'Alex', 11_000);
+  other.observe('track-2', 'Alex', 22_000);
+  assert.equal(other.isConfirmed('track-2', 'Alex', 22_000), false);
+});
+
+test('reset clears every pending gray-zone streak', () => {
+  const confirmer = new IdentityConfirmer(2);
+  confirmer.observe('track-1', 'Alex');
+  confirmer.reset();
+  confirmer.observe('track-1', 'Alex');
+  assert.equal(confirmer.isConfirmed('track-1', 'Alex'), false);
 });

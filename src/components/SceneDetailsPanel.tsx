@@ -18,7 +18,7 @@ export const SceneDetailsPanel: React.FC<SceneDetailsPanelProps> = ({ details, n
         <div className="rounded-xl border border-fuchsia-500/40 bg-fuchsia-950/50 p-2 text-fuchsia-300"><Sparkles className="h-4 w-4" /></div>
         <div>
           <h2 className="font-mono text-xs font-bold uppercase tracking-widest text-fuchsia-200">Live scene details</h2>
-          <p className="text-[10px] text-slate-500">Who and what the active camera can currently see</p>
+          <p className="text-[10px] text-slate-500">What is happening in the live view right now</p>
         </div>
       </div>
       <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 font-mono text-[11px] text-slate-200">

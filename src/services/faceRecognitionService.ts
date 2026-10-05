@@ -1,5 +1,7 @@
-import { BodyLandmark, BodyPosture, CompreFaceDetection, DetectionObject } from '../types';
+import { BodyLandmark, BodyPosture, CompreFaceDetection, CompreFaceSubject, DetectionObject } from '../types';
 import { filterImplausibleFaces } from './faceDetectionGate';
+import { conservativeIdentityThreshold, identityThreshold, isNegativeSubject } from './detectionSettings';
+import { encodeCanvasWithinByteBudget } from './imageEncoding';
 
 // A face should disappear quickly after the detector loses it. Keeping a
 // person alive for multiple seconds is a common source of "ghost" sightings.
@@ -27,6 +29,20 @@ function clamp(value: number, min: number, max: number) {
 
 function topSimilarity(detection: CompreFaceDetection): number {
   return Math.max(0, ...(detection.subjects || []).map((subject) => subject.similarity));
+}
+
+/**
+ * Subjects sorted strongest-first. CompreFace normally returns them in this
+ * order, but nothing guarantees it, and announcing `subjects[0]` verbatim has
+ * produced wrong-name alerts when it was not.
+ */
+export function rankedSubjects(detection: CompreFaceDetection): CompreFaceSubject[] {
+  return [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
+}
+
+/** The single strongest enrolled-subject match for a detection, if any. */
+export function topSubjectOf(detection: CompreFaceDetection): CompreFaceSubject | null {
+  return rankedSubjects(detection)[0] || null;
 }
 
 function boxArea(detection: CompreFaceDetection): number {
@@ -185,6 +201,12 @@ export class FaceRecognitionService {
   private isProcessing = false;
   /** Count of boxes rejected as implausible, surfaced for diagnostics. */
   public suppressedFaceCount = 0;
+  /**
+   * Cumulative count of detections dropped because their strongest subject is
+   * a negative/noise profile (e.g. `Background_Noise`). Read by the live
+   * cycle to attribute the drops in the recognition activity panel.
+   */
+  public negativeSubjectDropped = 0;
   private lastRecognitionError = '';
 
   getLastRecognitionError(): string {
@@ -198,13 +220,23 @@ export class FaceRecognitionService {
     return FaceRecognitionService.instance;
   }
 
-  /** Calls CompreFace through the backend proxy with landmarks only. */
-  async recognize(imageBase64: string, frameWidth = 0, frameHeight = 0): Promise<CompreFaceDetection[]> {
+  /**
+   * Calls CompreFace through the backend proxy with landmarks only.
+   * `detProbThreshold` is the caller's detector confidence floor; the server
+   * forwards it as `det_prob_threshold` so the detector itself filters at the
+   * gateway instead of shipping boxes the client would discard anyway.
+   */
+  async recognize(
+    imageBase64: string,
+    frameWidth = 0,
+    frameHeight = 0,
+    detProbThreshold?: number,
+  ): Promise<CompreFaceDetection[]> {
     if (this.isProcessing) return [];
     this.isProcessing = true;
 
     try {
-      const result = await this.requestRecognition(imageBase64, 'standard', frameWidth, frameHeight);
+      const result = await this.requestRecognition(imageBase64, 'standard', frameWidth, frameHeight, detProbThreshold);
       this.lastRecognitionError = '';
       return result;
     } catch (err) {
@@ -225,12 +257,20 @@ export class FaceRecognitionService {
   async recognizeAtLongRange(
     imageBase64: string,
     sourceFrame: HTMLCanvasElement,
+    standardDetProbThreshold?: number,
+    distantDetProbThreshold?: number,
   ): Promise<CompreFaceDetection[]> {
     if (this.isProcessing) return [];
     this.isProcessing = true;
 
     try {
-      const primary = await this.requestRecognition(imageBase64, 'standard', sourceFrame.width, sourceFrame.height);
+      const primary = await this.requestRecognition(
+        imageBase64,
+        'standard',
+        sourceFrame.width,
+        sourceFrame.height,
+        standardDetProbThreshold,
+      );
       if (!shouldRunLongRangeTiles(primary, sourceFrame.width, sourceFrame.height)) {
         this.lastRecognitionError = '';
         return primary;
@@ -243,7 +283,13 @@ export class FaceRecognitionService {
       for (let start = 0; start < tiles.length; start += 2) {
         const results = await Promise.all(tiles.slice(start, start + 2).map(async (tile) => {
           try {
-            const detections = await this.requestRecognition(tile.imageBase64, 'distant', tile.imageWidth, tile.imageHeight);
+            const detections = await this.requestRecognition(
+              tile.imageBase64,
+              'distant',
+              tile.imageWidth,
+              tile.imageHeight,
+              distantDetProbThreshold,
+            );
             return detections.map((detection) => mapDetectionFromTile(detection, tile, tile.imageWidth, tile.imageHeight));
           } catch (error) {
             // A single slow tile should not discard normal-pass results or
@@ -271,11 +317,12 @@ export class FaceRecognitionService {
     detectionProfile: 'standard' | 'distant',
     frameWidth: number,
     frameHeight: number,
+    detProbThreshold?: number,
   ): Promise<CompreFaceDetection[]> {
     const res = await fetch('/api/recognition/recognize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ imageBase64, detectionProfile }),
+      body: JSON.stringify({ imageBase64, detectionProfile, detProbThreshold }),
     });
 
     if (!res.ok) {
@@ -293,7 +340,14 @@ export class FaceRecognitionService {
     if (filtered.length !== raw.length) {
       this.suppressedFaceCount += raw.length - filtered.length;
     }
-    return filtered;
+    // Negative/noise profiles (e.g. `Background_Noise`) are recognized noise:
+    // drop the whole detection so it can never raise an unknown-person alert
+    // or pollute the face album.
+    const kept = filtered.filter((detection) => !isNegativeSubject(topSubjectOf(detection)?.subject));
+    if (kept.length !== filtered.length) {
+      this.negativeSubjectDropped += filtered.length - kept.length;
+    }
+    return kept;
   }
 
   private createLongRangeTiles(sourceFrame: HTMLCanvasElement): Array<EncodedFaceTile & { imageWidth: number; imageHeight: number }> {
@@ -325,14 +379,18 @@ export class FaceRecognitionService {
         context.imageSmoothingQuality = 'high';
         context.drawImage(sourceFrame, x, y, sourceTileWidth, sourceTileHeight, 0, 0, imageWidth, imageHeight);
         try {
+          // Tiles obey the same byte budget as the main frame; if the budget
+          // forces a shrink, the encoded dimensions replace the nominal ones
+          // so box mapping stays exact.
+          const encoded = encodeCanvasWithinByteBudget(tileCanvas);
           tiles.push({
             x,
             y,
             width: sourceTileWidth,
             height: sourceTileHeight,
-            imageWidth,
-            imageHeight,
-            imageBase64: tileCanvas.toDataURL('image/jpeg', 0.92),
+            imageWidth: encoded.width,
+            imageHeight: encoded.height,
+            imageBase64: encoded.imageBase64,
           });
         } catch (error) {
           // Cross-origin camera frames can block encoding. The normal pass is
@@ -346,19 +404,22 @@ export class FaceRecognitionService {
   }
 
   isReliableMatch(detection: CompreFaceDetection, threshold: number): boolean {
-    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    // Honor the "Sensitive" setting while keeping a meaningful floor and a
-    // clear lead over the next enrolled identity. This is especially important
-    // for small distant faces whose embedding score is naturally lower.
-    const requiredSimilarity = Math.max(0.85, Math.min(0.99, threshold));
+    const [best, runnerUp] = rankedSubjects(detection);
+    // The Face Database similarity slider is honored across its full range
+    // while a clear lead over the next enrolled identity is still required.
+    // This is especially important for small distant faces whose embedding
+    // score is naturally lower.
+    const requiredSimilarity = identityThreshold(threshold);
     return Boolean(best && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.06));
   }
 
   /** Stricter gate used before a name can trigger an alert or DVR event. */
   isConservativeMatch(detection: CompreFaceDetection, threshold: number): boolean {
-    const [best, runnerUp] = [...(detection.subjects || [])].sort((a, b) => b.similarity - a.similarity);
-    const requiredSimilarity = Math.max(0.96, Math.min(0.995, threshold));
+    const [best, runnerUp] = rankedSubjects(detection);
+    // Always one step stricter than the naming threshold, so an announced
+    // identity never rests on the exact score that merely labeled the HUD.
+    const requiredSimilarity = conservativeIdentityThreshold(threshold);
     return Boolean(best && detection.box.probability >= 0.70 && best.similarity >= requiredSimilarity &&
       (!runnerUp || best.similarity - runnerUp.similarity >= 0.10));
   }

@@ -15,12 +15,21 @@ import {
   Eye,
   Volume2,
 } from 'lucide-react';
-import { DetectionSensitivities, CategorySensitivity, SubjectCategory } from '../../types';
+import { DetectionSensitivities, CategorySensitivity } from '../../types';
 import { DEFAULT_SENSITIVITIES } from '../../services/db';
+import {
+  confirmationScans,
+  conservativeIdentityThreshold,
+  faceProbabilityFloor,
+  identityThreshold,
+  petMatchThreshold,
+} from '../../services/detectionSettings';
 
 interface AiSensitivitiesSectionProps {
   sensitivities: DetectionSensitivities;
   onChange: (s: DetectionSensitivities) => void;
+  /** Face Database similarity threshold, shown alongside the People gates. */
+  faceMatchThreshold: number;
 }
 
 type DetectionCategoryKey = Exclude<keyof DetectionSensitivities, 'fixedCameraGuard'>;
@@ -32,58 +41,104 @@ interface CategoryConfig {
   icon: React.ReactNode;
   defaultColor: string;
   subcategories: string[];
+  /** What in this build actually follows this category's switches. */
+  pipeline: 'face' | 'delivery' | 'none';
 }
 
 const CATEGORIES: CategoryConfig[] = [
   {
     key: 'people',
     label: 'People & Intruders',
-    description: 'Human detection, loitering detection, perimeter breaches, and known vs unknown faces',
+    description: 'Master gate for the live face pipeline: detection confidence floor, monitored zone, confirmation scans, identity alerts, and the face-triggered DVR',
     icon: <User className="w-4 h-4 text-red-400" />,
     defaultColor: '#ef4444',
     subcategories: ['Pedestrians', 'Loitering', 'Front Door Approach', 'Unrecognized Persons'],
+    pipeline: 'face',
   },
   {
     key: 'threats',
     label: 'Threats & Perimeter Breach',
-    description: 'Aggressive movement, suspicious postures, tools/objects, and critical boundary breaches',
+    description: 'Gates the intruder-identification and rapid-approach alerts raised from recognized faces',
     icon: <AlertTriangle className="w-4 h-4 text-rose-500" />,
     defaultColor: '#dc2626',
-    subcategories: ['Perimeter Ingress', 'Rapid Approach', 'Aggressive Gesture', 'Boundary Breach'],
+    subcategories: ['Perimeter Ingress', 'Rapid Approach', 'Intruder Flags', 'Boundary Breach'],
+    pipeline: 'face',
   },
   {
     key: 'animals',
     label: 'Animals & Pets',
-    description: 'Detects animals by visible species or breed and recognizes enrolled pets by their assigned names',
+    description: 'Gates local pet recognition against enrolled animal reference photos and its alerts',
     icon: <Dog className="w-4 h-4 text-emerald-400" />,
     defaultColor: '#10b981',
-    subcategories: ['Dogs by breed', 'Cats by breed', 'Wildlife species', 'Enrolled pet names'],
+    subcategories: ['Enrolled pet names', 'Reference photo matching', 'Two-scan confirmation'],
+    pipeline: 'face',
   },
   {
     key: 'cars',
     label: 'Vehicles & Traffic',
-    description: 'Automobiles, delivery trucks, motorcycles, driveway entry, and speed monitoring',
+    description: 'No vehicle detector is bundled in this build. The enabled switch gates the delivery-activity notifier for vehicle-like labels',
     icon: <Car className="w-4 h-4 text-amber-400" />,
     defaultColor: '#f59e0b',
-    subcategories: ['Driveway Ingress', 'Delivery Vans', 'License Plate Zone', 'Speed Velocity'],
+    subcategories: ['Delivery Vans', 'Courier Trucks', 'Notifier Gate'],
+    pipeline: 'delivery',
   },
   {
     key: 'objects',
     label: 'Objects & Deliveries',
-    description: 'Packages on doorsteps, abandoned luggage, tools, and stationary obstacles',
+    description: 'No object detector is bundled in this build. The enabled switch gates the delivery-activity notifier for package-like labels',
     icon: <Package className="w-4 h-4 text-cyan-400" />,
     defaultColor: '#06b6d4',
-    subcategories: ['Doorstep Deliveries', 'Abandoned Baggage', 'Bicycles / Tools', 'Obstacle Hazards'],
+    subcategories: ['Doorstep Deliveries', 'Package Labels', 'Notifier Gate'],
+    pipeline: 'delivery',
   },
   {
     key: 'weather',
     label: 'Weather & Optical Scatter',
-    description: 'Dense fog, torrential precipitation, snow scatter, and camera lens obstruction',
+    description: 'No weather or optical-scatter detector is bundled; these controls are saved but have no effect in this build',
     icon: <CloudRain className="w-4 h-4 text-purple-400" />,
     defaultColor: '#8b5cf6',
-    subcategories: ['Dense Fog Penetration', 'Rain Streaks', 'Snow Scatter', 'Optical Smudge'],
+    subcategories: ['Reserved for a future detector'],
+    pipeline: 'none',
   },
 ];
+
+/** Derived, live values for the selected category so the sliders' effect is visible before saving. */
+function liveEffectLines(
+  config: CategoryConfig,
+  setting: CategorySensitivity,
+  faceMatchThreshold: number,
+): string[] {
+  if (config.pipeline === 'face' && config.key === 'people') {
+    return [
+      `Detector confidence floor: ${Math.round(faceProbabilityFloor(setting) * 100)}% — boxes below it are discarded`,
+      `Confirmation scans required: ${confirmationScans(setting.sensitivity)} consecutive frame(s)`,
+      `HUD naming at ${Math.round(identityThreshold(faceMatchThreshold) * 100)}% similarity; alerts at ${Math.round(conservativeIdentityThreshold(faceMatchThreshold) * 100)}%`,
+    ];
+  }
+  if (config.pipeline === 'face' && config.key === 'threats') {
+    return [
+      'Gates the intruder-identification and rapid-approach alerts',
+      'Trigger Alert off silences both alert types without touching detection',
+    ];
+  }
+  if (config.pipeline === 'face' && config.key === 'animals') {
+    return [
+      `Pet match threshold: ${Math.round(petMatchThreshold(setting) * 100)}% signature similarity`,
+      'A pet name is attached only after two agreeing scans',
+      'Enabled off disables local pet recognition entirely',
+    ];
+  }
+  if (config.pipeline === 'delivery') {
+    return [
+      'No detector of this kind is bundled in this build',
+      'The enabled switch gates the delivery-activity notifier for its labels',
+    ];
+  }
+  return [
+    'No detector of this kind is bundled in this build',
+    'Controls are saved and will apply when a detector is connected',
+  ];
+}
 
 const PRESET_COLORS = [
   '#ef4444', // Red
@@ -99,6 +154,7 @@ const PRESET_COLORS = [
 export const AiSensitivitiesSection: React.FC<AiSensitivitiesSectionProps> = ({
   sensitivities,
   onChange,
+  faceMatchThreshold,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<DetectionCategoryKey>('people');
   const [saveToast, setSaveToast] = useState(false);
@@ -124,7 +180,8 @@ export const AiSensitivitiesSection: React.FC<AiSensitivitiesSectionProps> = ({
     if (preset === 'high_security') {
       updated = {
         fixedCameraGuard: sensitivities.fixedCameraGuard,
-        people: { ...sensitivities.people, sensitivity: 98, confidenceThreshold: 0.5, triggerAlert: true, audibleChime: true },
+        // 100 sensitivity = a single scan confirms a face.
+        people: { ...sensitivities.people, sensitivity: 100, confidenceThreshold: 0.5, triggerAlert: true, audibleChime: true },
         threats: { ...sensitivities.threats, sensitivity: 100, confidenceThreshold: 0.5, triggerAlert: true, audibleChime: true },
         animals: { ...sensitivities.animals, sensitivity: 80, confidenceThreshold: 0.65 },
         cars: { ...sensitivities.cars, sensitivity: 90, confidenceThreshold: 0.6, triggerAlert: true },
@@ -133,10 +190,12 @@ export const AiSensitivitiesSection: React.FC<AiSensitivitiesSectionProps> = ({
       };
     } else if (preset === 'low_false_positive') {
       updated = {
-        fixedCameraGuard: sensitivities.fixedCameraGuard,
-        people: { ...sensitivities.people, sensitivity: 75, confidenceThreshold: 0.8, triggerAlert: true, audibleChime: true },
-        threats: { ...sensitivities.threats, sensitivity: 85, confidenceThreshold: 0.75, triggerAlert: true, audibleChime: true },
-        animals: { ...sensitivities.animals, sensitivity: 60, confidenceThreshold: 0.85 },
+        fixedCameraGuard: true,
+        // 40 sensitivity = four consecutive scans and a raised confidence
+        // floor before anything is reported.
+        people: { ...sensitivities.people, sensitivity: 40, confidenceThreshold: 0.85, triggerAlert: true, audibleChime: true },
+        threats: { ...sensitivities.threats, sensitivity: 70, confidenceThreshold: 0.8, triggerAlert: true, audibleChime: true },
+        animals: { ...sensitivities.animals, sensitivity: 60, confidenceThreshold: 0.9 },
         cars: { ...sensitivities.cars, sensitivity: 65, confidenceThreshold: 0.85 },
         objects: { ...sensitivities.objects, sensitivity: 65, confidenceThreshold: 0.8 },
         weather: { ...sensitivities.weather, sensitivity: 50, confidenceThreshold: 0.85 },
@@ -176,7 +235,9 @@ export const AiSensitivitiesSection: React.FC<AiSensitivitiesSectionProps> = ({
             )}
           </div>
           <p className="text-xs text-slate-400 font-mono mt-1">
-            Fine-tune neural vision thresholds for all 7 subject categories with sub-pixel bounding precision.
+            Every control below is applied live by the detection pipeline. People, Threats, and Animals
+            gate the bundled face pipeline; Vehicles and Objects gate the delivery notifier; Weather has
+            no bundled detector.
           </p>
         </div>
 
@@ -302,6 +363,28 @@ export const AiSensitivitiesSection: React.FC<AiSensitivitiesSectionProps> = ({
             <Zap className="w-3.5 h-3.5" />
             <span>{currentSetting.enabled ? 'CATEGORY ACTIVE' : 'DISABLED'}</span>
           </button>
+        </div>
+
+        {/* Live effect readout: what the current values actually do */}
+        <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3">
+          <div className="flex items-center gap-2 mb-1.5">
+            {currentConfig.pipeline === 'face' ? (
+              <Eye className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <Eye className="w-3.5 h-3.5 text-slate-500" />
+            )}
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-300">
+              {currentConfig.pipeline === 'face' ? 'Live pipeline effect' : 'No live detector'}
+            </span>
+          </div>
+          <ul className="space-y-0.5">
+            {liveEffectLines(currentConfig, currentSetting, faceMatchThreshold).map((line) => (
+              <li key={line} className="text-[11px] font-mono text-slate-400 flex gap-2">
+                <span className="text-cyan-500 shrink-0">•</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
         </div>
 
         {/* Sliders Grid */}

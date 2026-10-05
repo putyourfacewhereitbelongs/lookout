@@ -5,6 +5,7 @@ import {
   mapDetectionFromTile,
   mergeFaceDetections,
   shouldRunLongRangeTiles,
+  topSubjectOf,
 } from '../src/services/faceRecognitionService';
 import type { CompreFaceDetection, DetectionObject } from '../src/types';
 
@@ -148,4 +149,105 @@ test('preserves non-person objects while matching face detections', () => {
   const objects = service.correlateDetections(existing, [detection()], 400, 400, 0.92);
   assert.equal(objects.some((object) => object.id === 'car-1'), true);
   assert.equal(objects.filter((object) => object.category === 'person').length, 1);
+});
+
+// --- settings-driven identity gating ---------------------------------------
+
+test('a borderline identity needs the alert margin above the naming threshold', () => {
+  const borderline = detection([{ subject: 'Alex', similarity: 0.94 }]);
+  // Naming at the default 92% slider succeeds...
+  assert.equal(service.isReliableMatch(borderline, 0.92), true);
+  // ...but the conservative gate asks for more before alerting.
+  assert.equal(service.isConservativeMatch(borderline, 0.92), false);
+});
+
+test('the conservative gate follows the similarity slider down to its floor', () => {
+  const weak = detection([{ subject: 'Alex', similarity: 0.9 }]);
+  assert.equal(service.isConservativeMatch(weak, 0.85), true);
+  assert.equal(service.isConservativeMatch(weak, 0.92), false);
+  const strong = detection([{ subject: 'Alex', similarity: 0.98 }]);
+  assert.equal(service.isConservativeMatch(strong, 0.92), true);
+});
+
+test('a 97% match is still announced at every slider position that used to announce it', () => {
+  // Regression guard: a raised slider must not push the alert requirement
+  // past 97%, or previously recognized people stop being announced.
+  const match = detection([{ subject: 'Alex', similarity: 0.97 }]);
+  for (const slider of [0.85, 0.92, 0.95, 0.96, 0.97]) {
+    assert.equal(service.isConservativeMatch(match, slider), true, `slider ${slider} must still alert a 97% match`);
+  }
+  // Above 97% the slider itself is the requirement, as it always was.
+  assert.equal(service.isConservativeMatch(match, 0.98), false);
+  const excellent = detection([{ subject: 'Alex', similarity: 0.99 }]);
+  assert.equal(service.isConservativeMatch(excellent, 0.98), true);
+});
+
+test('the conservative gate still rejects ambiguous runner-up scores and weak boxes', () => {
+  const ambiguous = detection([
+    { subject: 'Alex', similarity: 0.98 },
+    { subject: 'Alec', similarity: 0.93 },
+  ]);
+  assert.equal(service.isConservativeMatch(ambiguous, 0.92), false);
+  const weakBox = {
+    ...detection([{ subject: 'Alex', similarity: 0.98 }]),
+    box: { probability: 0.5, x_min: 100, y_min: 80, x_max: 300, y_max: 280 },
+  };
+  assert.equal(service.isConservativeMatch(weakBox, 0.92), false);
+});
+
+test('the top subject is ranked by similarity, not by list order', () => {
+  const shuffled = detection([
+    { subject: 'Alec', similarity: 0.91 },
+    { subject: 'Alex', similarity: 0.97 },
+  ]);
+  assert.equal(topSubjectOf(shuffled)?.subject, 'Alex');
+  assert.equal(topSubjectOf(detection()), null);
+});
+
+// --- gateway threshold forwarding and negative/noise profiles ------------------
+
+test('forwards the detector floor and drops negative/noise profile matches', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: any;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    capturedBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({
+      result: [
+        detection([{ subject: 'Background_Noise', similarity: 0.94 }]),
+        detection([{ subject: 'Alex', similarity: 0.95 }]),
+      ],
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const droppedBefore = service.negativeSubjectDropped;
+    const result = await service.recognize('data:image/jpeg;base64,AAAA', 1280, 720, 0.82);
+
+    // The detector threshold rides along so CompreFace filters at the gateway.
+    assert.equal(capturedBody.detProbThreshold, 0.82);
+    assert.equal(capturedBody.detectionProfile, 'standard');
+
+    // Known noise never reaches the pipeline; real identities survive.
+    assert.equal(result.length, 1);
+    assert.equal(topSubjectOf(result[0])?.subject, 'Alex');
+    assert.equal(service.negativeSubjectDropped - droppedBefore, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ordinary subject names are never mistaken for negative profiles', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    result: [detection([{ subject: 'Brian', similarity: 0.96 }])],
+  }), { status: 200 })) as typeof fetch;
+
+  try {
+    const droppedBefore = service.negativeSubjectDropped;
+    const result = await service.recognize('data:image/jpeg;base64,AAAA', 1280, 720);
+    assert.equal(result.length, 1);
+    assert.equal(service.negativeSubjectDropped - droppedBefore, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
