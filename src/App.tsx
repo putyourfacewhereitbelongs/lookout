@@ -795,7 +795,7 @@ export function App() {
           // Tiled requests and browser-side corroboration can occasionally
           // miss one scan. Hold a confirmed presence through those gaps so
           // its tracked box does not flash away.
-          framesToDrop: 8,
+          framesToDrop: 15,
         });
         // Attribute every gate drop so the recognition activity panel can show
         // exactly why a face did not make it through.
