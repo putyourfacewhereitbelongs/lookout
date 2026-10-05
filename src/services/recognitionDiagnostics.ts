@@ -51,6 +51,12 @@ export interface RecognitionActivity {
   petConfirmedScans: number;
   /** Implausible boxes filtered by the noise gate (cumulative). */
   implausibleBoxesSuppressed: number;
+  /** Scans skipped because the scene was still (no motion, heartbeat not due). */
+  stillSceneSkips: number;
+  /** Detections dropped because they matched a negative/noise profile. */
+  negativeProfileMatches: number;
+  /** Gray-zone identities that earned an alert through consecutive agreeing scans. */
+  grayZoneConfirmations: number;
   /** Recognition requests that failed. */
   recognitionErrors: number;
   /** Timestamp of the last recorded scan, or null before the first one. */
@@ -72,6 +78,9 @@ const EMPTY_ACTIVITY: RecognitionActivity = {
   petCandidateScans: 0,
   petConfirmedScans: 0,
   implausibleBoxesSuppressed: 0,
+  stillSceneSkips: 0,
+  negativeProfileMatches: 0,
+  grayZoneConfirmations: 0,
   recognitionErrors: 0,
   lastCycleAt: null,
   gates: null,
@@ -132,6 +141,25 @@ class RecognitionDiagnostics {
   /** A recognition request failed. */
   recordRecognitionError(): void {
     this.activity.recognitionErrors += 1;
+    this.emit();
+  }
+
+  /** A scan was skipped because the scene was still and no heartbeat was due. */
+  recordStillSceneSkip(): void {
+    this.activity.stillSceneSkips += 1;
+    this.emit();
+  }
+
+  /** Detections were dropped because they matched a negative/noise profile. */
+  recordNegativeProfileMatches(count: number): void {
+    if (count <= 0) return;
+    this.activity.negativeProfileMatches += count;
+    this.emit();
+  }
+
+  /** A gray-zone identity was confirmed by consecutive agreeing scans. */
+  recordGrayZoneConfirmation(): void {
+    this.activity.grayZoneConfirmations += 1;
     this.emit();
   }
 

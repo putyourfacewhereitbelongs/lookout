@@ -1,4 +1,4 @@
-import { CategorySensitivity, CompreFaceDetection, DetectionSensitivities } from '../types';
+import { CategorySensitivity, CompreFaceDetection, DetectionSensitivities, DetectionObject } from '../types';
 import { MIN_FACE_PROBABILITY } from './faceDetectionGate';
 
 /**
@@ -174,4 +174,53 @@ export function deliveryLabelAllowed(label: string, sensitivities: DetectionSens
 /** Only well-formed hex colors reach the canvas, so bad input cannot freeze a style. */
 export function isHexColor(value: unknown): value is string {
   return typeof value === 'string' && /^#[0-9a-f]{3,8}$/i.test(value);
+}
+
+// ---------------------------------------------------------------------------
+// Negative / noise subject profiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Subject names that mean "this is known noise, never identify it". Enroll a
+ * CompreFace subject under one of these names (e.g. `Background_Noise`) using
+ * photos of whatever the system keeps falsely identifying — a poster, a
+ * reflection, a photo on the wall — and detections matching it are dropped
+ * entirely: no identity, no unknown-person alert, no face-album cataloging.
+ */
+const NEGATIVE_SUBJECT_PATTERN =
+  /^(unknown_classifiers?|background_noise|negative_samples?|negatives?|noise|do_not_match|ignore_face|ignore_this_face)$/i;
+
+export function isNegativeSubject(name: string | null | undefined): boolean {
+  return typeof name === 'string' && NEGATIVE_SUBJECT_PATTERN.test(name.trim());
+}
+
+/**
+ * Find the tracked object a detection belongs to, by containment of the
+ * detection center in the object's box (smallest containing box wins). Used
+ * to key per-face state — like gray-zone identity confirmation — to a stable
+ * track id that survives the face moving between scans.
+ */
+export function findTrackForDetection(
+  objects: DetectionObject[],
+  detection: CompreFaceDetection,
+  frameWidth: number,
+  frameHeight: number,
+): DetectionObject | null {
+  if (frameWidth <= 0 || frameHeight <= 0) return null;
+  const centerX = ((detection.box.x_min + detection.box.x_max) / 2) / frameWidth;
+  const centerY = ((detection.box.y_min + detection.box.y_max) / 2) / frameHeight;
+  let best: DetectionObject | null = null;
+  let bestArea = Infinity;
+  for (const object of objects) {
+    if (object.category !== 'person' && object.category !== 'animal') continue;
+    const [x, y, width, height] = object.bbox;
+    if (centerX >= x && centerX <= x + width && centerY >= y && centerY <= y + height) {
+      const area = width * height;
+      if (area < bestArea) {
+        bestArea = area;
+        best = object;
+      }
+    }
+  }
+  return best;
 }

@@ -9,13 +9,15 @@ import {
   detectionCenterInZone,
   detectionPassesCategory,
   faceProbabilityFloor,
+  findTrackForDetection,
   identityThreshold,
   isHexColor,
+  isNegativeSubject,
   petMatchThreshold,
   unknownFaceAlertKey,
 } from '../src/services/detectionSettings';
 import { PetMatchConfirmer, PetMatch } from '../src/services/petRecognitionService';
-import { CategorySensitivity, CompreFaceDetection, DetectionSensitivities } from '../src/types';
+import { CategorySensitivity, CompreFaceDetection, DetectionObject, DetectionSensitivities } from '../src/types';
 import { MIN_FACE_PROBABILITY } from '../src/services/faceDetectionGate';
 
 function category(overrides: Partial<CategorySensitivity> = {}): CategorySensitivity {
@@ -262,4 +264,33 @@ test('a lost match clears that track only', () => {
   assert.equal(confirmer.confirm('cell-0-0', null, 2_000), null);
   assert.equal(confirmer.confirm('cell-0-0', petMatch('Max'), 3_000), null);
   assert.equal(confirmer.confirm('cell-1-1', petMatch('Bella'), 3_000)?.profile.name, 'Bella');
+});
+
+// --- negative / noise subject profiles ----------------------------------------
+
+test('recognizes negative/noise subject profile names', () => {
+  assert.equal(isNegativeSubject('Background_Noise'), true);
+  assert.equal(isNegativeSubject('background_noise'), true);
+  assert.equal(isNegativeSubject('unknown_classifiers'), true);
+  assert.equal(isNegativeSubject(' Negative_Samples '), true);
+  assert.equal(isNegativeSubject('do_not_match'), true);
+  assert.equal(isNegativeSubject('Brian'), false);
+  assert.equal(isNegativeSubject('Background Noisy'), false);
+  assert.equal(isNegativeSubject(''), false);
+  assert.equal(isNegativeSubject(null), false);
+  assert.equal(isNegativeSubject(undefined), false);
+});
+
+// --- tracked-object lookup for per-face state ---------------------------------
+
+test('finds the tightest tracked object containing the detection center', () => {
+  const objects = [
+    { id: 'big', category: 'person', bbox: [0, 0, 0.9, 0.9] },
+    { id: 'tight', category: 'person', bbox: [0.4, 0.4, 0.2, 0.2] },
+    { id: 'car', category: 'car', bbox: [0.4, 0.4, 0.2, 0.2] },
+  ] as unknown as DetectionObject[];
+  const inside = { box: { x_min: 500, y_min: 400, x_max: 560, y_max: 460 } } as CompreFaceDetection;
+  assert.equal(findTrackForDetection(objects, inside, 1000, 900)?.id, 'tight');
+  const outside = { box: { x_min: 950, y_min: 850, x_max: 990, y_max: 890 } } as CompreFaceDetection;
+  assert.equal(findTrackForDetection(objects, outside, 1000, 900), null);
 });

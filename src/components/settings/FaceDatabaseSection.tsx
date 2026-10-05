@@ -539,6 +539,9 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
                 { label: 'UNKNOWN REPORTS', value: activity.unknownPersonReports, hint: 'unidentified person alerts' },
                 { label: 'BELOW FLOOR', value: activity.droppedBelowFloor, hint: 'dropped by confidence floor' },
                 { label: 'OUTSIDE ZONE', value: activity.droppedOutsideZone, hint: 'dropped by monitored zone' },
+                { label: 'STILL SKIPS', value: activity.stillSceneSkips, hint: 'scans skipped — scene static, no motion' },
+                { label: 'GRAY CONFIRMS', value: activity.grayZoneConfirmations, hint: 'gray-zone names confirmed by consecutive scans' },
+                { label: 'NEGATIVE DROPS', value: activity.negativeProfileMatches, hint: 'matched a negative/noise profile (e.g. Background_Noise)' },
                 { label: 'SCAN ERRORS', value: activity.recognitionErrors, hint: 'failed recognition requests' },
               ].map((item) => (
                 <div key={item.label} className="p-2 rounded-lg bg-slate-900 border border-slate-800" title={item.hint}>
@@ -554,6 +557,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
               lower the similarity match threshold above. Nothing at all? Check the PEOPLE gate and the
               confidence floor, and confirm the CompreFace status at the top of this panel.
               {activity.implausibleBoxesSuppressed > 0 && ` Noise gate filtered ${activity.implausibleBoxesSuppressed} implausible box(es).`}
+              {activity.stillSceneSkips > 0 && ` Skipped ${activity.stillSceneSkips} scan(s) because the scene was still (frames are only sent on motion, with a slow heartbeat).`}
               {activity.petCandidateScans > 0 && ` Pet candidates: ${activity.petCandidateScans} scan(s), ${activity.petConfirmedScans} confirmed.`}
             </div>
           </>
@@ -772,6 +776,7 @@ export const FaceDatabaseSection: React.FC<FaceDatabaseSectionProps> = ({
                       <img key={idx} src={url} alt="Avatar option" onClick={() => setNewAvatar(url)} className={`w-10 h-10 rounded-lg object-cover cursor-pointer border-2 shrink-0 ${newAvatar === url ? 'border-cyan-400 ring-1 ring-cyan-400 scale-105' : 'border-transparent opacity-60 hover:opacity-100'}`} />
                     ))}
                   </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Face enrollment happens from live captures in the Face Album. Use head-and-shoulders photos there — tightly cropped faces match poorly, and photos that keep falsely matching can be enrolled as a negative profile (e.g. <span className="text-slate-400">Background_Noise</span>) which the app ignores.</p>
                 </div>
               )}
 

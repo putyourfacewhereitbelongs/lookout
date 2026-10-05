@@ -112,3 +112,23 @@ test('reset clears the whole session', () => {
   assert.equal(activity.gates, null);
   assert.equal(activity.lastCycleAt, null);
 });
+
+test('records still-scene skips, negative-profile drops, and gray-zone confirmations', () => {
+  recognitionDiagnostics.reset();
+  recognitionDiagnostics.recordStillSceneSkip();
+  recognitionDiagnostics.recordStillSceneSkip();
+  recognitionDiagnostics.recordNegativeProfileMatches(0); // no-op guard
+  recognitionDiagnostics.recordNegativeProfileMatches(3);
+  recognitionDiagnostics.recordGrayZoneConfirmation();
+
+  const activity = recognitionDiagnostics.getActivity();
+  assert.equal(activity.stillSceneSkips, 2);
+  assert.equal(activity.negativeProfileMatches, 3);
+  assert.equal(activity.grayZoneConfirmations, 1);
+
+  recognitionDiagnostics.reset();
+  const cleared = recognitionDiagnostics.getActivity();
+  assert.equal(cleared.stillSceneSkips, 0);
+  assert.equal(cleared.negativeProfileMatches, 0);
+  assert.equal(cleared.grayZoneConfirmations, 0);
+});

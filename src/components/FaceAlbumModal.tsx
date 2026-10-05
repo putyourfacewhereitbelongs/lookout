@@ -18,6 +18,7 @@ import {
 import { FaceProfile } from '../types';
 import { StorageService } from '../services/db';
 import { faceRecognitionService } from '../services/faceRecognitionService';
+import { validateEnrollmentImage } from '../services/faceThumbnail';
 import { RefreshCw } from 'lucide-react';
 
 interface FaceAlbumModalProps {
@@ -119,6 +120,13 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
     }
     if (!editingProfile.thumbnail.startsWith('data:image/')) {
       setRegistrationMessage('This profile has no captured face image to register.');
+      return;
+    }
+    // Reference-photo guidance enforced app-side: tiny or oddly-shaped images
+    // embed poorly, and a bad enrollment poisons every later match.
+    const enrollmentCheck = await validateEnrollmentImage(editingProfile.thumbnail);
+    if (!enrollmentCheck.ok) {
+      setRegistrationMessage(enrollmentCheck.reason || 'This reference photo is not suitable for enrollment.');
       return;
     }
 
@@ -442,6 +450,7 @@ export const FaceAlbumModal: React.FC<FaceAlbumModalProps> = ({ isOpen, onClose,
                       {comprefaceSubjects.map((subject) => <option key={subject} value={subject}>Add face to {subject}</option>)}
                     </select>
                     <p className="text-[10px] text-slate-400">Choose an existing person or enter a new name above. The displayed captured face will be enrolled.</p>
+                    <p className="text-[10px] text-slate-500">Best matches come from head-and-shoulders captures with the face clearly visible — tightly cropped faces enroll poorly.</p>
                     {registrationMessage && <p className="text-[10px] text-amber-300">{registrationMessage}</p>}
                   </div>
                 )}

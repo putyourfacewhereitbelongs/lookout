@@ -52,10 +52,11 @@ import { videoProcessor } from './services/videoProcessor';
 import { faceRecognitionService, topSubjectOf } from './services/faceRecognitionService';
 import { liveSyncService } from './services/liveSyncService';
 import { petRecognitionService, PetMatchConfirmer } from './services/petRecognitionService';
-import { isGlobalCameraMotion } from './services/cameraMotionGuard';
+import { createLocalMotionState, isGlobalCameraMotion, observeLocalMotion } from './services/cameraMotionGuard';
 import { alertCenter, PushAlertInput } from './services/alertCenter';
 import { captureCanvasGif } from './services/gifEncoder';
 import { createFaceThumbnail } from './services/faceThumbnail';
+import { captureJpegFrameWithinByteBudget } from './services/imageEncoding';
 import {
   confirmationScans,
   conservativeIdentityThreshold,
@@ -64,6 +65,7 @@ import {
   detectionCenterInZone,
   detectionPassesCategory,
   faceProbabilityFloor,
+  findTrackForDetection,
   identityThreshold,
   petMatchThreshold,
   unknownFaceAlertKey,
@@ -82,7 +84,7 @@ import { AddCameraModal } from './components/AddCameraModal';
 import { EventHistoryPanel } from './components/EventHistoryPanel';
 import { SceneDetailsPanel, SceneCaptionOverlay } from './components/SceneDetailsPanel';
 import { narrateScene } from './services/sceneNarrator';
-import { FacePresenceTracker } from './services/faceDetectionGate';
+import { FacePresenceTracker, IdentityConfirmer, MIN_DISTANT_FACE_PROBABILITY } from './services/faceDetectionGate';
 import { audioCueService, captureElementAudio } from './services/audioCueService';
 import { AudioCueOverlay } from './components/AudioCueOverlay';
 import { CUE_SEVERITY } from './services/audioCueClassifier';
@@ -494,6 +496,14 @@ export function App() {
   // A local pet-photo match may only name a subject after a second agreeing
   // scan; a single weak colour-signature hit used to announce people as pets.
   const petConfirmerRef = useRef(new PetMatchConfirmer());
+  // Local motion sampling: while the scene is still, frames are not sent to
+  // the recognizer at all (a slow heartbeat keeps tracks fresh).
+  const localMotionStateRef = useRef(createLocalMotionState());
+  // Timestamp of the last frame actually submitted for recognition.
+  const lastRecognitionSentAtRef = useRef(0);
+  // Gray-zone identity confirmation: a match below the alert threshold must
+  // agree across consecutive scans before it may raise an alert.
+  const identityConfirmerRef = useRef(new IdentityConfirmer());
 
   useEffect(() => { activeCameraRef.current = activeCamera; }, [activeCamera]);
   useEffect(() => { camerasRef.current = cameras; }, [cameras]);
@@ -622,6 +632,13 @@ export function App() {
     // Switching cameras must not inherit the previous view's confirmations.
     facePresenceRef.current.reset();
     petConfirmerRef.current.reset();
+    identityConfirmerRef.current.reset();
+    localMotionStateRef.current.previous = null;
+    // At most one frame per interval reaches the recognizer (roughly one per
+    // 0.5–1s depending on the device), and while the scene is still only a
+    // slow heartbeat keeps presence tracks from going stale.
+    const RECOGNITION_MIN_SEND_INTERVAL_MS = isPhone ? 900 : 600;
+    const STILL_SCENE_HEARTBEAT_MS = 5000;
 
     const runCompreFaceRecognitionCycle = async () => {
       if (!isMounted) return;
@@ -639,6 +656,7 @@ export function App() {
       if (!peopleSettings.enabled && !animalsSettings.enabled) {
         facePresenceRef.current.reset();
         petConfirmerRef.current.reset();
+        identityConfirmerRef.current.reset();
         if (detectedObjectsRef.current.some((object) => object.category === 'person' || object.category === 'animal')) {
           detectedObjectsRef.current = detectedObjectsRef.current.filter((object) => object.category !== 'person' && object.category !== 'animal');
           setDetectedObjects([...detectedObjectsRef.current]);
@@ -674,26 +692,34 @@ export function App() {
       let snapH = 270;
       let recognitionCanvas: HTMLCanvasElement | null = null;
 
-      // Keep normal recognition inexpensive. On the scheduled long-range pass,
-      // preserve materially more of the desktop camera's native detail before
-      // splitting it into enlarged face tiles. Phones retain their lighter
-      // capture policy for live responsiveness.
       if (video && video.readyState >= 2 && video.videoWidth > 0) {
-        const offscreen = document.createElement('canvas');
-        recognitionCanvas = offscreen;
-        // Keep recognition detailed enough for small faces while staying below
-        // the expensive full-resolution camera frame.
-        const maximumWidth = isPhone ? 960 : 1280;
-        snapW = Math.min(maximumWidth, video.videoWidth);
-        snapH = Math.round((snapW * video.videoHeight) / video.videoWidth);
-        offscreen.width = snapW;
-        offscreen.height = snapH;
-        const ctx = offscreen.getContext('2d');
-        if (ctx) {
-          ctx.imageSmoothingEnabled = true;
-          ctx.imageSmoothingQuality = 'high';
-          ctx.drawImage(video, 0, 0, snapW, snapH);
-          snapshotBase64 = offscreen.toDataURL('image/jpeg', isPhone ? 0.82 : 0.90);
+        // --- Local motion gate (debounce) --------------------------------
+        // A tiny 32×18 grayscale sample decides whether anything moved since
+        // the last scan. While the scene is still, no frame is encoded or
+        // sent at all: a slow heartbeat keeps presence tracks fresh, and real
+        // motion instantly resumes full-rate scanning. CPU usage and
+        // CompreFace load stay proportional to actual activity instead of
+        // streaming a static wall at the recognizer at full frame rate.
+        const now = Date.now();
+        const sinceLastSend = now - lastRecognitionSentAtRef.current;
+        const motion = observeLocalMotion(localMotionStateRef.current, video);
+        const heartbeatDue = sinceLastSend >= STILL_SCENE_HEARTBEAT_MS;
+        if (sinceLastSend < RECOGNITION_MIN_SEND_INTERVAL_MS || (!motion.hasMotion && !heartbeatDue)) {
+          recognitionDiagnostics.recordStillSceneSkip();
+          if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
+          return;
+        }
+        lastRecognitionSentAtRef.current = now;
+
+        // Capture below the expensive full camera resolution and JPEG-encode
+        // within the ~100KB payload budget the recognizer expects. Phones
+        // keep their lighter capture policy for live responsiveness.
+        const capture = captureJpegFrameWithinByteBudget(video, isPhone ? 960 : 1280);
+        if (capture) {
+          snapshotBase64 = capture.imageBase64;
+          snapW = capture.width;
+          snapH = capture.height;
+          recognitionCanvas = capture.canvas;
         }
       }
 
@@ -701,6 +727,7 @@ export function App() {
         // No frame means no evidence of anyone; clear accumulated presence so
         // a resumed feed must re-confirm from scratch.
         facePresenceRef.current.reset();
+        identityConfirmerRef.current.reset();
         syncFaceTriggeredDvr(false);
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 600 : 350);
         return;
@@ -712,43 +739,29 @@ export function App() {
       }
 
       try {
-        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1800;
+        // The long-range tiled pass re-verifies small faces about once a
+        // second: often enough to confirm a distant identity within a few
+        // scans, cheap enough not to burden the recognizer.
+        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1000;
         if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
+        // The client's own confidence floor becomes the detector's gateway
+        // threshold (det_prob_threshold): boxes the client would discard are
+        // never shipped back by the recognizer. Upscaled long-range tiles use
+        // the higher distant floor.
+        const activeFloorCategory = peopleSettings.enabled ? peopleSettings : animalsSettings;
+        const recognitionFloor = faceProbabilityFloor(activeFloorCategory);
+        const distantRecognitionFloor = Math.max(recognitionFloor, MIN_DISTANT_FACE_PROBABILITY);
+        const negativeDroppedBefore = faceRecognitionService.negativeSubjectDropped;
         let detections = useLongRange && recognitionCanvas
-          ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas)
-          : await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
-        // Borderline identities get a second independent inference on the same
-        // high-resolution frame. A name survives only when both checks agree;
-        // a disagreement becomes an unknown face instead of a false alert.
-        const needsSecondCheck = detections.some((detection) => {
-          const top = topSubjectOf(detection);
-          return Boolean(top && top.similarity < 0.96);
-        });
-        if (needsSecondCheck) {
-          const secondPass = await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
-          // A failed second request proves nothing: a service hiccup must not
-          // erase an otherwise good identity, so only a clean, conclusive pass
-          // may clear a name. An empty successful pass is a real disagreement.
-          const secondPassConclusive = secondPass.length > 0 || !faceRecognitionService.getLastRecognitionError();
-          if (secondPassConclusive) {
-            // People move between the two inference passes; the association
-            // window scales with the frame so a walking person is still
-            // corroborated instead of flipping to "unknown person".
-            const corroborationRadius = Math.max(90, snapW * 0.1);
-            detections = detections.map((detection) => {
-              const firstSubject = topSubjectOf(detection);
-              if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
-              const corroborating = secondPass.find((candidate) => {
-                const secondSubject = topSubjectOf(candidate);
-                const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
-                const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
-                return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < corroborationRadius;
-              });
-              const corroboratingSubject = topSubjectOf(corroborating);
-              return corroboratingSubject ? { ...detection, subjects: [corroboratingSubject] } : { ...detection, subjects: [] };
-            });
-          }
-        }
+          ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas, recognitionFloor, distantRecognitionFloor)
+          : await faceRecognitionService.recognize(snapshotBase64, snapW, snapH, recognitionFloor);
+        // Detections whose strongest subject is a negative/noise profile
+        // (e.g. `Background_Noise`) are dropped inside the service: known
+        // noise never becomes an identity, an unknown-person alert, or a
+        // face-album entry. Attribute the drops for the activity panel.
+        recognitionDiagnostics.recordNegativeProfileMatches(
+          faceRecognitionService.negativeSubjectDropped - negativeDroppedBefore
+        );
         // Each sensitivity gate is applied per detection before anything can
         // react: the People category owns the person pipeline, the Animals
         // category owns local pet recognition, and each has its own confidence
@@ -848,7 +861,38 @@ export function App() {
             const goesToAnimals = inAnimalPipeline(d);
             const center = detectionCenter(d, snapW, snapH);
             const topSubj = topSubjectOf(d);
-            if (topSubj && goesToPeople && faceRecognitionService.isConservativeMatch(d, storagePreferencesRef.current.faceMatchThreshold)) {
+            // Dual-threshold identity decision:
+            //  - At or above the alert threshold the match is accepted
+            //    immediately.
+            //  - Between the naming and alert thresholds (the gray zone) the
+            //    name is held until the same tracked face agrees on the same
+            //    subject for several consecutive scans; an identity change, a
+            //    drop below the naming bar, or a long gap resets it.
+            //  - Below the naming threshold the face is treated as unknown.
+            // A second inference pass on the same frame used to guard the
+            // gray zone; temporal agreement across scans does that job now
+            // without doubling the request load on the recognizer.
+            const namingOk = Boolean(topSubj)
+              && goesToPeople
+              && faceRecognitionService.isReliableMatch(d, identityThreshold(storagePreferencesRef.current.faceMatchThreshold));
+            const absoluteMatch = namingOk
+              && faceRecognitionService.isConservativeMatch(d, storagePreferencesRef.current.faceMatchThreshold);
+            let identityConfirmed = absoluteMatch;
+            if (namingOk && topSubj) {
+              const track = findTrackForDetection(detectedObjectsRef.current, d, snapW, snapH);
+              const trackKey = track?.id ?? `position:${unknownFaceAlertKey(activeCamId, center.x, center.y)}`;
+              identityConfirmerRef.current.observe(trackKey, topSubj.subject);
+              if (!absoluteMatch && identityConfirmerRef.current.isConfirmed(trackKey, topSubj.subject)) {
+                identityConfirmed = true;
+                recognitionDiagnostics.recordGrayZoneConfirmation();
+              }
+            } else if (goesToPeople) {
+              // No candidate at or above the naming bar: drop any pending
+              // gray-zone streak for this face so confirmation must restart.
+              const track = findTrackForDetection(detectedObjectsRef.current, d, snapW, snapH);
+              if (track) identityConfirmerRef.current.observe(track.id, null);
+            }
+            if (topSubj && identityConfirmed) {
               const matchedProfile = StorageService.getFaceProfiles().find((profile) => profile.name.toLowerCase() === topSubj.subject.toLowerCase());
               const isIntruder = matchedProfile?.role === 'intruder';
               StorageService.updateFaceLastSeenByName(topSubj.subject);
@@ -930,6 +974,9 @@ export function App() {
                 });
               }
             } else {
+              // Reference photos must include the full head and shoulders —
+              // a tight face-only crop enrolls poorly and mismatches live
+              // frames — so the album capture pads far beyond the face box.
               const faceCrop = createFaceThumbnail({
                 box: d.box,
                 frameWidth: snapW,
@@ -938,6 +985,7 @@ export function App() {
                 fallback: recognitionCanvas,
                 outputSize: 1024,
                 quality: 0.94,
+                padding: 0.85,
               });
               // Animal profiles are recognized locally against their enrolled
               // reference photos, independently of CompreFace's human-face
@@ -998,7 +1046,10 @@ export function App() {
                   handledAsPet = true;
                 }
               }
-              if (!handledAsPet && goesToPeople) {
+              // A gray-zone face (named on the HUD but not yet confirmed
+              // for alerting) is intentionally held here: no unknown-person
+              // alert and no face-album entry while its identity is pending.
+              if (!handledAsPet && goesToPeople && !namingOk) {
                 recognitionDiagnostics.recordUnknownPerson();
                 StorageService.catalogUnknownFace(
                   'Unknown Subject',
@@ -1030,9 +1081,10 @@ export function App() {
       }
 
       if (isMounted) {
-        // Avoid serializing oversized frames faster than the remote recognizer
-        // can consume them; latency depends on one request's completion time.
-        timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 500 : 120);
+        // The motion gate above paces actual sends (at most one frame per
+        // RECOGNITION_MIN_SEND_INTERVAL_MS); this tick only decides how soon
+        // the next motion sample runs.
+        timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 700 : 300);
       }
     };
 
@@ -1311,17 +1363,8 @@ export function App() {
 
 
   const captureLiveVideoFrame = (maxWidth = isPhone ? 960 : 2560) => {
-    const video = videoElementRef.current;
-    if (!video || video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
-    const width = Math.min(maxWidth, video.videoWidth);
-    const height = Math.round((width * video.videoHeight) / video.videoWidth);
-    const frame = document.createElement('canvas');
-    frame.width = width;
-    frame.height = height;
-    const context = frame.getContext('2d');
-    if (!context) return null;
-    context.drawImage(video, 0, 0, width, height);
-    return { imageBase64: frame.toDataURL('image/jpeg', isPhone ? 0.84 : 0.90), width, height, canvas: frame };
+    // Manual scans obey the same ~100KB payload budget as the live cycle.
+    return captureJpegFrameWithinByteBudget(videoElementRef.current, maxWidth);
   };
 
   /** Short status toast used by the manual scan controls. */

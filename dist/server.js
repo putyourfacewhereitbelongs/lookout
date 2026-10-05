@@ -86,18 +86,24 @@ app.post("/api/recognition/recognize", async (req, res) => {
     if (!COMPREFACE_API_KEY) {
       return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, result: [] });
     }
-    const { imageBase64, detectionProfile } = req.body;
+    const { imageBase64, detectionProfile, detProbThreshold } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ success: false, error: "Missing imageBase64" });
     }
     const isDistantScan = detectionProfile === "distant";
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, "");
     const buffer = Buffer.from(cleanBase64, "base64");
+    if (buffer.byteLength > 8 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: "Frame exceeds the 8MB recognition payload limit", result: [] });
+    }
     const formData = new FormData();
     const blob = new Blob([buffer], { type: "image/jpeg" });
     formData.append("file", blob, "frame.jpg");
-    const detectorThreshold = isDistantScan ? 0.25 : 0.35;
-    const targetUrl = comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}`);
+    const requestedThreshold = typeof detProbThreshold === "number" && Number.isFinite(detProbThreshold) ? Math.min(0.95, Math.max(0.5, detProbThreshold)) : null;
+    const detectorThreshold = requestedThreshold ?? (isDistantScan ? 0.93 : 0.82);
+    const targetUrl = comprefaceUrl(
+      `/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&face_plugins=landmarks&status=false`
+    );
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), isDistantScan ? 8e3 : 15e3);
     let response;

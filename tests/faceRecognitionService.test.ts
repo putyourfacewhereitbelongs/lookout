@@ -203,3 +203,51 @@ test('the top subject is ranked by similarity, not by list order', () => {
   assert.equal(topSubjectOf(shuffled)?.subject, 'Alex');
   assert.equal(topSubjectOf(detection()), null);
 });
+
+// --- gateway threshold forwarding and negative/noise profiles ------------------
+
+test('forwards the detector floor and drops negative/noise profile matches', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody: any;
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    capturedBody = JSON.parse(String(init.body));
+    return new Response(JSON.stringify({
+      result: [
+        detection([{ subject: 'Background_Noise', similarity: 0.94 }]),
+        detection([{ subject: 'Alex', similarity: 0.95 }]),
+      ],
+    }), { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const droppedBefore = service.negativeSubjectDropped;
+    const result = await service.recognize('data:image/jpeg;base64,AAAA', 1280, 720, 0.82);
+
+    // The detector threshold rides along so CompreFace filters at the gateway.
+    assert.equal(capturedBody.detProbThreshold, 0.82);
+    assert.equal(capturedBody.detectionProfile, 'standard');
+
+    // Known noise never reaches the pipeline; real identities survive.
+    assert.equal(result.length, 1);
+    assert.equal(topSubjectOf(result[0])?.subject, 'Alex');
+    assert.equal(service.negativeSubjectDropped - droppedBefore, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('ordinary subject names are never mistaken for negative profiles', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    result: [detection([{ subject: 'Brian', similarity: 0.96 }])],
+  }), { status: 200 })) as typeof fetch;
+
+  try {
+    const droppedBefore = service.negativeSubjectDropped;
+    const result = await service.recognize('data:image/jpeg;base64,AAAA', 1280, 720);
+    assert.equal(result.length, 1);
+    assert.equal(service.negativeSubjectDropped - droppedBefore, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

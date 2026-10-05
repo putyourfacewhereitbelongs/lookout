@@ -114,7 +114,7 @@ app.post('/api/recognition/recognize', async (req, res) => {
       return res.status(503).json({ success: false, error: COMPREFACE_API_KEY_REQUIRED, result: [] });
     }
 
-    const { imageBase64, detectionProfile } = req.body;
+    const { imageBase64, detectionProfile, detProbThreshold } = req.body;
     if (!imageBase64) {
       return res.status(400).json({ success: false, error: 'Missing imageBase64' });
     }
@@ -122,17 +122,27 @@ app.post('/api/recognition/recognize', async (req, res) => {
 
     const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
     const buffer = Buffer.from(cleanBase64, 'base64');
+    if (buffer.byteLength > 8 * 1024 * 1024) {
+      return res.status(413).json({ success: false, error: 'Frame exceeds the 8MB recognition payload limit', result: [] });
+    }
 
     const formData = new FormData();
     const blob = new Blob([buffer], { type: 'image/jpeg' });
     formData.append('file', blob, 'frame.jpg');
 
-    // The normal stream pass is permissive. Enlarged long-range tiles are
-    // allowed a lower detector threshold because the client still requires a
-    // configured identity similarity and an unambiguous match before naming a
-    // person. This improves small-face recall without weakening ID safety.
-    const detectorThreshold = isDistantScan ? 0.25 : 0.35;
-    const targetUrl = comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}`);
+    // Gateway-level filtering: the client sends its own confidence floor
+    // (clamped to a sane band here), so the detector never returns boxes the
+    // client would immediately discard. `status=false` keeps the payload
+    // minimal, and `face_plugins=landmarks` requests the 5-point landmarks
+    // the client uses to reject heavily turned or rolled faces.
+    const requestedThreshold =
+      typeof detProbThreshold === 'number' && Number.isFinite(detProbThreshold)
+        ? Math.min(0.95, Math.max(0.5, detProbThreshold))
+        : null;
+    const detectorThreshold = requestedThreshold ?? (isDistantScan ? 0.93 : 0.82);
+    const targetUrl = comprefaceUrl(
+      `/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&face_plugins=landmarks&status=false`,
+    );
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), isDistantScan ? 8000 : 15000);
