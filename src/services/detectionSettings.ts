@@ -17,12 +17,14 @@ export const DEFAULT_FACE_MATCH_THRESHOLD = 0.92;
 
 /**
  * Naming a face on the HUD uses the slider value directly. Alert-level
- * identification always asks for a little more than the slider, so a name on
- * screen is never announced as an alert at the exact same score.
+ * identification asks for a small step above the slider, but never exceeds
+ * the shipped 97% strictness that recognized people before the slider was
+ * live — raising the slider above 0.92 must not silently make alerts harder
+ * than they used to be.
  */
 export const CONSERVATIVE_MATCH_MARGIN = 0.05;
 export const CONSERVATIVE_MATCH_MIN = 0.9;
-export const CONSERVATIVE_MATCH_MAX = 0.995;
+export const CONSERVATIVE_MATCH_CEILING = 0.97;
 
 /**
  * Local pet recognition compares tiny colour signatures, so it is far weaker
@@ -59,10 +61,13 @@ export function identityThreshold(preference: number): number {
 
 /**
  * The stricter identity threshold required before a name may raise an alert,
- * history event, or DVR reaction. Always a step above the naming threshold.
+ * history event, or DVR reaction: a small step above the naming threshold,
+ * capped at the shipped 97% behavior, and never below the slider itself.
  */
 export function conservativeIdentityThreshold(preference: number): number {
-  return round3(clamp(identityThreshold(preference) + CONSERVATIVE_MATCH_MARGIN, CONSERVATIVE_MATCH_MIN, CONSERVATIVE_MATCH_MAX));
+  const slider = identityThreshold(preference);
+  const withMargin = round3(clamp(slider + CONSERVATIVE_MATCH_MARGIN, CONSERVATIVE_MATCH_MIN, CONSERVATIVE_MATCH_CEILING));
+  return Math.max(slider, withMargin);
 }
 
 /**

@@ -169,6 +169,19 @@ test('the conservative gate follows the similarity slider down to its floor', ()
   assert.equal(service.isConservativeMatch(strong, 0.92), true);
 });
 
+test('a 97% match is still announced at every slider position that used to announce it', () => {
+  // Regression guard: a raised slider must not push the alert requirement
+  // past 97%, or previously recognized people stop being announced.
+  const match = detection([{ subject: 'Alex', similarity: 0.97 }]);
+  for (const slider of [0.85, 0.92, 0.95, 0.96, 0.97]) {
+    assert.equal(service.isConservativeMatch(match, slider), true, `slider ${slider} must still alert a 97% match`);
+  }
+  // Above 97% the slider itself is the requirement, as it always was.
+  assert.equal(service.isConservativeMatch(match, 0.98), false);
+  const excellent = detection([{ subject: 'Alex', similarity: 0.99 }]);
+  assert.equal(service.isConservativeMatch(excellent, 0.98), true);
+});
+
 test('the conservative gate still rejects ambiguous runner-up scores and weak boxes', () => {
   const ambiguous = detection([
     { subject: 'Alex', similarity: 0.98 },

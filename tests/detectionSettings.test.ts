@@ -54,16 +54,34 @@ test('out-of-range or invalid slider values fall back to safe bounds', () => {
   assert.equal(identityThreshold(0), 0.92);
 });
 
-test('alert identification always requires more than the naming threshold', () => {
+test('alert identification stays a step above the naming threshold', () => {
   assert.equal(conservativeIdentityThreshold(0.85), 0.9);
   assert.equal(conservativeIdentityThreshold(0.92), 0.97);
-  assert.equal(conservativeIdentityThreshold(0.99), 0.995);
-  for (const preference of [0.85, 0.88, 0.92, 0.95, 0.99]) {
+  assert.equal(conservativeIdentityThreshold(0.99), 0.99);
+  for (const preference of [0.85, 0.88, 0.9, 0.92, 0.95, 0.97]) {
     assert.ok(
-      conservativeIdentityThreshold(preference) > identityThreshold(preference),
-      `conservative gate must exceed the naming threshold at ${preference}`,
+      conservativeIdentityThreshold(preference) >= identityThreshold(preference),
+      `alert gate must never sit below the naming threshold at ${preference}`,
     );
   }
+});
+
+test('raising the slider never makes alerts stricter than the shipped 97% behavior', () => {
+  // Before the slider was live, alerts effectively required 97% (or the
+  // slider when it was above 0.97). A high slider value must not silently
+  // demand more than that, or people who used to be recognized stop being
+  // announced.
+  const oldEffectiveAlertThreshold = (slider: number) => Math.max(0.97, slider);
+  for (const slider of [0.85, 0.88, 0.9, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99]) {
+    assert.ok(
+      conservativeIdentityThreshold(slider) <= oldEffectiveAlertThreshold(slider) + 1e-9,
+      `alert threshold at slider ${slider} regressed beyond the previous release`,
+    );
+  }
+  assert.equal(conservativeIdentityThreshold(0.95), 0.97);
+  assert.equal(conservativeIdentityThreshold(0.96), 0.97);
+  assert.equal(conservativeIdentityThreshold(0.97), 0.97);
+  assert.equal(conservativeIdentityThreshold(0.98), 0.98);
 });
 
 // --- detection confidence floor ---------------------------------------------

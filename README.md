@@ -121,7 +121,9 @@ Hovering a card pauses its countdown, `Esc` clears the stack, and repeated sight
 
 The detection sensitivity slider maps to how many consecutive scans must confirm a face (one scan at 100%, six at the lowest setting), and the confidence slider raises the detector probability floor above the built-in 82% false-positive guard. Each category also owns its alert switch, audible chime, monitored zone, and HUD bounding-box color, and the panel shows the derived values live.
 
-The **Face Database similarity match threshold** (85–99%) is honored across its full range: on-screen naming uses the exact value, and alert-level identification always requires a little more than it.
+The **Face Database similarity match threshold** (85–99%) is honored across its full range: on-screen naming uses the exact value, and alert-level identification requires a small step above it — capped at the shipped 97% strictness, so raising the slider never makes alerts harder than they were before the slider was live.
+
+**Settings -> Face Database -> Live Recognition Activity** shows, in real time, every stage a face passes or fails: how many faces were seen, how many were dropped by the confidence floor or monitored zone, how many were confirmed, named, and identified, plus the exact gates in effect and any recognition request errors. It is the first place to look when someone "used to be recognized" and no longer is.
 
 ## Low-CPU recognition mode
 

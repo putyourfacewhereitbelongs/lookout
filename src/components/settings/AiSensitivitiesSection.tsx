@@ -19,6 +19,7 @@ import { DetectionSensitivities, CategorySensitivity } from '../../types';
 import { DEFAULT_SENSITIVITIES } from '../../services/db';
 import {
   confirmationScans,
+  conservativeIdentityThreshold,
   faceProbabilityFloor,
   identityThreshold,
   petMatchThreshold,
@@ -111,7 +112,7 @@ function liveEffectLines(
     return [
       `Detector confidence floor: ${Math.round(faceProbabilityFloor(setting) * 100)}% — boxes below it are discarded`,
       `Confirmation scans required: ${confirmationScans(setting.sensitivity)} consecutive frame(s)`,
-      `Identity naming uses the Face Database similarity threshold (${Math.round(identityThreshold(faceMatchThreshold) * 100)}%)`,
+      `HUD naming at ${Math.round(identityThreshold(faceMatchThreshold) * 100)}% similarity; alerts at ${Math.round(conservativeIdentityThreshold(faceMatchThreshold) * 100)}%`,
     ];
   }
   if (config.pipeline === 'face' && config.key === 'threats') {

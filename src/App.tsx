@@ -58,13 +58,17 @@ import { captureCanvasGif } from './services/gifEncoder';
 import { createFaceThumbnail } from './services/faceThumbnail';
 import {
   confirmationScans,
+  conservativeIdentityThreshold,
   deliveryLabelAllowed,
   detectionCenter,
+  detectionCenterInZone,
   detectionPassesCategory,
+  faceProbabilityFloor,
   identityThreshold,
   petMatchThreshold,
   unknownFaceAlertKey,
 } from './services/detectionSettings';
+import { recognitionDiagnostics } from './services/recognitionDiagnostics';
 
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { QRCodeModal } from './components/QRCodeModal';
@@ -640,6 +644,26 @@ export function App() {
           setDetectedObjects([...detectedObjectsRef.current]);
         }
         syncFaceTriggeredDvr(false);
+        recognitionDiagnostics.recordCycle({
+          facesSeen: 0,
+          droppedBelowFloor: 0,
+          droppedOutsideZone: 0,
+          pendingConfirmation: 0,
+          confirmedFaces: 0,
+          namedOnHud: 0,
+          identifiedFaces: 0,
+          implausibleBoxesSuppressed: faceRecognitionService.suppressedFaceCount,
+          gates: {
+            masterEnabled: true,
+            peopleEnabled: false,
+            animalsEnabled: false,
+            confidenceFloor: faceProbabilityFloor(peopleSettings),
+            detectionZone: peopleSettings.detectionZone,
+            namingThreshold: identityThreshold(storagePreferencesRef.current.faceMatchThreshold),
+            alertThreshold: conservativeIdentityThreshold(storagePreferencesRef.current.faceMatchThreshold),
+            confirmationScans: confirmationScans(peopleSettings.sensitivity),
+          },
+        });
         if (isMounted) timer = setTimeout(runCompreFaceRecognitionCycle, isPhone ? 800 : 400);
         return;
       }
@@ -702,18 +726,28 @@ export function App() {
         });
         if (needsSecondCheck) {
           const secondPass = await faceRecognitionService.recognize(snapshotBase64, snapW, snapH);
-          detections = detections.map((detection) => {
-            const firstSubject = topSubjectOf(detection);
-            if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
-            const corroborating = secondPass.find((candidate) => {
-              const secondSubject = topSubjectOf(candidate);
-              const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
-              const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
-              return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < 90;
+          // A failed second request proves nothing: a service hiccup must not
+          // erase an otherwise good identity, so only a clean, conclusive pass
+          // may clear a name. An empty successful pass is a real disagreement.
+          const secondPassConclusive = secondPass.length > 0 || !faceRecognitionService.getLastRecognitionError();
+          if (secondPassConclusive) {
+            // People move between the two inference passes; the association
+            // window scales with the frame so a walking person is still
+            // corroborated instead of flipping to "unknown person".
+            const corroborationRadius = Math.max(90, snapW * 0.1);
+            detections = detections.map((detection) => {
+              const firstSubject = topSubjectOf(detection);
+              if (!firstSubject || firstSubject.similarity >= 0.96) return detection;
+              const corroborating = secondPass.find((candidate) => {
+                const secondSubject = topSubjectOf(candidate);
+                const firstCenter = [(detection.box.x_min + detection.box.x_max) / 2, (detection.box.y_min + detection.box.y_max) / 2];
+                const secondCenter = [(candidate.box.x_min + candidate.box.x_max) / 2, (candidate.box.y_min + candidate.box.y_max) / 2];
+                return secondSubject?.subject.toLowerCase() === firstSubject.subject.toLowerCase() && Math.hypot(firstCenter[0] - secondCenter[0], firstCenter[1] - secondCenter[1]) < corroborationRadius;
+              });
+              const corroboratingSubject = topSubjectOf(corroborating);
+              return corroboratingSubject ? { ...detection, subjects: [corroboratingSubject] } : { ...detection, subjects: [] };
             });
-            const corroboratingSubject = topSubjectOf(corroborating);
-            return corroboratingSubject ? { ...detection, subjects: [corroboratingSubject] } : { ...detection, subjects: [] };
-          });
+          }
         }
         // Each sensitivity gate is applied per detection before anything can
         // react: the People category owns the person pipeline, the Animals
@@ -738,14 +772,54 @@ export function App() {
         facePresenceRef.current.configure({
           framesToConfirm: confirmationScans((peopleSettings.enabled ? peopleSettings : animalsSettings).sensitivity),
         });
-        const presence = facePresenceRef.current.update(
-          detections.filter((d) => inPeoplePipeline(d) || inAnimalPipeline(d))
-        );
+        // Attribute every gate drop so the recognition activity panel can show
+        // exactly why a face did not make it through.
+        const facesSeenThisScan = detections.length;
+        let droppedBelowFloor = 0;
+        let droppedOutsideZone = 0;
+        const activeDetections = detections.filter((d) => {
+          if (inPeoplePipeline(d) || inAnimalPipeline(d)) return true;
+          if (peopleSettings.enabled) {
+            if (d.box.probability < faceProbabilityFloor(peopleSettings)) droppedBelowFloor += 1;
+            else if (!detectionCenterInZone(d, snapW, snapH, peopleSettings.detectionZone)) droppedOutsideZone += 1;
+          }
+          return false;
+        });
+        const presence = facePresenceRef.current.update(activeDetections);
         detections = presence.confirmed;
         // The face-triggered DVR is a People-category reaction; with People
         // switched off, confirmed faces may still label pets but never start
         // a recording or announce a person.
         syncFaceTriggeredDvr(peopleSettings.enabled && presence.facePresent);
+
+        // Publish this scan's outcome so Settings can show why a face was or
+        // was not recognized (gates, floors, and per-stage counters).
+        const activeCategory = peopleSettings.enabled ? peopleSettings : animalsSettings;
+        const namingThreshold = identityThreshold(storagePreferencesRef.current.faceMatchThreshold);
+        recognitionDiagnostics.recordCycle({
+          facesSeen: facesSeenThisScan,
+          droppedBelowFloor,
+          droppedOutsideZone,
+          pendingConfirmation: presence.pendingCount,
+          confirmedFaces: presence.confirmed.length,
+          namedOnHud: presence.confirmed.filter(
+            (d) => topSubjectOf(d) && faceRecognitionService.isReliableMatch(d, namingThreshold)
+          ).length,
+          identifiedFaces: presence.confirmed.filter(
+            (d) => topSubjectOf(d) && faceRecognitionService.isConservativeMatch(d, storagePreferencesRef.current.faceMatchThreshold)
+          ).length,
+          implausibleBoxesSuppressed: faceRecognitionService.suppressedFaceCount,
+          gates: {
+            masterEnabled: true,
+            peopleEnabled: peopleSettings.enabled,
+            animalsEnabled: animalsSettings.enabled,
+            confidenceFloor: faceProbabilityFloor(activeCategory),
+            detectionZone: activeCategory.detectionZone,
+            namingThreshold,
+            alertThreshold: conservativeIdentityThreshold(storagePreferencesRef.current.faceMatchThreshold),
+            confirmationScans: confirmationScans(activeCategory.sensitivity),
+          },
+        });
 
         const cameraMotionActive = sensitivities.fixedCameraGuard && Date.now() < cameraMotionRef.current.suppressUntil;
         if (isMounted && !cameraMotionActive) {
@@ -874,12 +948,14 @@ export function App() {
               let handledAsPet = false;
               if (goesToAnimals && faceCrop) {
                 const petMatch = await petRecognitionService.match(faceCrop, StorageService.getFaceProfiles(), petMatchThreshold(animalsSettings));
+                if (petMatch) recognitionDiagnostics.recordPetCandidate();
                 const confirmedPet = petConfirmerRef.current.confirm(
                   unknownFaceAlertKey(activeCamId, center.x, center.y),
                   petMatch
                 );
                 if (confirmedPet) {
                   handledAsPet = true;
+                  recognitionDiagnostics.recordPetConfirmed();
                   const animalDetection = {
                     ...d,
                     subjects: [{ subject: confirmedPet.profile.name, similarity: confirmedPet.similarity }],
@@ -923,6 +999,7 @@ export function App() {
                 }
               }
               if (!handledAsPet && goesToPeople) {
+                recognitionDiagnostics.recordUnknownPerson();
                 StorageService.catalogUnknownFace(
                   'Unknown Subject',
                   'person',
@@ -949,6 +1026,7 @@ export function App() {
         }
       } catch (err) {
         console.warn('Face recognition cycle error:', err);
+        recognitionDiagnostics.recordRecognitionError();
       }
 
       if (isMounted) {
