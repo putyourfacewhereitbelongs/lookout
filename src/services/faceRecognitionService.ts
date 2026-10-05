@@ -1,5 +1,5 @@
 import { BodyLandmark, BodyPosture, CompreFaceDetection, CompreFaceSubject, DetectionObject } from '../types';
-import { filterImplausibleFaces } from './faceDetectionGate';
+import { filterImplausibleFaces, MIN_DISTANT_FACE_PROBABILITY } from './faceDetectionGate';
 import { conservativeIdentityThreshold, identityThreshold, isNegativeSubject } from './detectionSettings';
 import { encodeCanvasWithinByteBudget } from './imageEncoding';
 
@@ -336,7 +336,24 @@ export class FaceRecognitionService {
     // tracking, alerts, DVR, or scene narration — ever sees a phantom face.
     // Frame dimensions are those of the image actually submitted, which is
     // the pixel space the detector reports its boxes in.
-    const filtered = filterImplausibleFaces(raw, frameWidth, frameHeight, detectionProfile);
+    let filtered = filterImplausibleFaces(raw, frameWidth, frameHeight, detectionProfile);
+    // CompreFace installations do not all return identical box metadata. If
+    // every candidate was rejected by an optional geometry check, retain a
+    // conservative detector-only fallback rather than making the camera look
+    // completely blind. This still requires a strong detector probability,
+    // positive in-frame geometry, and a minimum usable face size.
+    if (filtered.length === 0 && raw.length > 0 && frameWidth > 0 && frameHeight > 0) {
+      const probabilityFloor = detectionProfile === 'distant' ? MIN_DISTANT_FACE_PROBABILITY : 0.82;
+      filtered = raw.filter((detection) => {
+        const width = detection.box.x_max - detection.box.x_min;
+        const height = detection.box.y_max - detection.box.y_min;
+        return detection.box.probability >= probabilityFloor &&
+          width >= 24 && height >= 24 &&
+          width <= frameWidth * 0.98 && height <= frameHeight * 0.98 &&
+          detection.box.x_max > 0 && detection.box.y_max > 0 &&
+          detection.box.x_min < frameWidth && detection.box.y_min < frameHeight;
+      });
+    }
     if (filtered.length !== raw.length) {
       this.suppressedFaceCount += raw.length - filtered.length;
     }
