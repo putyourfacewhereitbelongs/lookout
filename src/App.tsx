@@ -57,6 +57,7 @@ import { alertCenter, PushAlertInput } from './services/alertCenter';
 import { captureCanvasGif } from './services/gifEncoder';
 import { createFaceThumbnail } from './services/faceThumbnail';
 import { captureJpegFrameWithinByteBudget } from './services/imageEncoding';
+import { frontendFaceVerifier } from './services/frontendFaceVerifier';
 import {
   confirmationScans,
   conservativeIdentityThreshold,
@@ -755,6 +756,13 @@ export function App() {
         let detections = useLongRange && recognitionCanvas
           ? await faceRecognitionService.recognizeAtLongRange(snapshotBase64, recognitionCanvas, recognitionFloor, distantRecognitionFloor)
           : await faceRecognitionService.recognize(snapshotBase64, snapW, snapH, recognitionFloor);
+        // CompreFace remains the mandatory identity pass for every frame. On
+        // browsers that expose the native FaceDetector API, run a second
+        // front-end inference pass as a corroborating detector. It fails open
+        // on unsupported browsers and when it cannot see a tiny/dark face.
+        if (recognitionCanvas && detections.length) {
+          detections = await frontendFaceVerifier.verify(recognitionCanvas, detections);
+        }
         // Detections whose strongest subject is a negative/noise profile
         // (e.g. `Background_Noise`) are dropped inside the service: known
         // noise never becomes an identity, an unknown-person alert, or a
