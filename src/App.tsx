@@ -792,6 +792,10 @@ export function App() {
         // and the People sensitivity slider decides how many scans that takes.
         facePresenceRef.current.configure({
           framesToConfirm: confirmationScans((peopleSettings.enabled ? peopleSettings : animalsSettings).sensitivity),
+          // Tiled requests and browser-side corroboration can occasionally
+          // miss one scan. Hold a confirmed presence through those gaps so
+          // its tracked box does not flash away.
+          framesToDrop: 5,
         });
         // Attribute every gate drop so the recognition activity panel can show
         // exactly why a face did not make it through.

@@ -5,7 +5,10 @@ import { encodeCanvasWithinByteBudget } from './imageEncoding';
 
 // A face should disappear quickly after the detector loses it. Keeping a
 // person alive for multiple seconds is a common source of "ghost" sightings.
-const PERSON_TRACK_RETENTION_MS = 650;
+// Recognition requests, especially tiled small-face scans, can take longer
+// than one detector interval. Keep the last confirmed box alive through a
+// short missed result so it interpolates instead of blinking off and on.
+const PERSON_TRACK_RETENTION_MS = 1800;
 // Smaller overlapping crops let CompreFace spend its detector resolution on
 // a distant subject instead of resizing the entire wide camera frame down.
 const LONG_RANGE_TILE_COLUMNS = 3;
