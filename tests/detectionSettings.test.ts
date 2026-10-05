@@ -99,15 +99,15 @@ test('the category confidence slider can only raise the built-in false-positive 
 
 test('the sensitivity slider maps to consecutive confirmation scans', () => {
   assert.equal(confirmationScans(100), 1);
-  assert.equal(confirmationScans(90), 2);
-  assert.equal(confirmationScans(70), 3);
-  assert.equal(confirmationScans(60), 3);
-  assert.equal(confirmationScans(50), 4);
-  assert.equal(confirmationScans(40), 4);
+  assert.equal(confirmationScans(90), 1);
+  assert.equal(confirmationScans(70), 2);
+  assert.equal(confirmationScans(60), 2);
+  assert.equal(confirmationScans(50), 3);
+  assert.equal(confirmationScans(40), 3);
   assert.equal(confirmationScans(30), 5);
   assert.equal(confirmationScans(10), 6);
-  // The shipped default of 70 keeps the previous three-scan behavior.
-  assert.equal(confirmationScans(70), 3);
+  // The shipped default of 70 confirms after two agreeing scans.
+  assert.equal(confirmationScans(70), 2);
 });
 
 // --- pet matching threshold ---------------------------------------------------

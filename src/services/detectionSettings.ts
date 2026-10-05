@@ -88,9 +88,9 @@ export function faceProbabilityFloor(category: CategorySensitivity): number {
 export function confirmationScans(sensitivity: number): number {
   const value = Number.isFinite(sensitivity) ? sensitivity : 70;
   if (value >= 100) return 1;
-  if (value >= 90) return 2;
-  if (value >= 60) return 3;
-  if (value >= 40) return 4;
+  if (value >= 90) return 1;
+  if (value >= 60) return 2;
+  if (value >= 40) return 3;
   if (value >= 20) return 5;
   return 6;
 }

@@ -638,7 +638,7 @@ export function App() {
     // At most one frame per interval reaches the recognizer (roughly one per
     // 0.5–1s depending on the device), and while the scene is still only a
     // slow heartbeat keeps presence tracks from going stale.
-    const RECOGNITION_MIN_SEND_INTERVAL_MS = isPhone ? 900 : 600;
+    const RECOGNITION_MIN_SEND_INTERVAL_MS = isPhone ? 500 : 350;
     const STILL_SCENE_HEARTBEAT_MS = 5000;
 
     const runCompreFaceRecognitionCycle = async () => {
@@ -743,7 +743,7 @@ export function App() {
         // The long-range tiled pass re-verifies small faces about once a
         // second: often enough to confirm a distant identity within a few
         // scans, cheap enough not to burden the recognizer.
-        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 1000;
+        const useLongRange = recognitionCanvas && Date.now() - lastLongRangeScanAtRef.current > 4000;
         if (useLongRange) lastLongRangeScanAtRef.current = Date.now();
         // The client's own confidence floor becomes the detector's gateway
         // threshold (det_prob_threshold): boxes the client would discard are
