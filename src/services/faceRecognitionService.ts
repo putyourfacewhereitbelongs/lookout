@@ -8,7 +8,7 @@ import { encodeCanvasWithinByteBudget } from './imageEncoding';
 // Recognition requests, especially tiled small-face scans, can take longer
 // than one detector interval. Keep the last confirmed box alive through a
 // short missed result so it interpolates instead of blinking off and on.
-const PERSON_TRACK_RETENTION_MS = 1800;
+const PERSON_TRACK_RETENTION_MS = 6000;
 // Smaller overlapping crops let CompreFace spend its detector resolution on
 // a distant subject instead of resizing the entire wide camera frame down.
 const LONG_RANGE_TILE_COLUMNS = 3;
@@ -607,7 +607,7 @@ export class FaceRecognitionService {
         const intersection = overlapW * overlapH;
         const union = targetW * targetH + pw * ph - intersection;
         const overlap = union > 0 ? intersection / union : 0;
-        const maxDistance = Math.max(0.10, Math.min(0.20, Math.hypot(Math.max(targetW, pw), Math.max(targetH, ph)) * 1.8));
+        const maxDistance = Math.max(0.12, Math.min(0.30, Math.hypot(Math.max(targetW, pw), Math.max(targetH, ph)) * 2.4));
         const sameKnownIdentity = Boolean(
           isRecognized && subjectName && p.isKnown &&
           p.subjectName?.toLowerCase() === subjectName.toLowerCase()

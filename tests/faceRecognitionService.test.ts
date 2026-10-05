@@ -119,11 +119,11 @@ test('keeps the same head box attached through a larger position change', () => 
 
 test('removes a person track after face observations stop', () => {
   const [recent] = service.correlateDetections([], [detection()], 400, 400, 0.92);
-  const stale = { ...recent, id: 'stale-face', lastSeenTime: Date.now() - 5000 };
+  const stale = { ...recent, id: 'stale-face', lastSeenTime: Date.now() - 7000 };
   const remaining = service.correlateDetections([recent, stale], [], 400, 400, 0.92);
   assert.deepEqual(remaining.map((item) => item.id), [recent.id]);
 
-  const expired = { ...recent, lastSeenTime: Date.now() - 5000 };
+  const expired = { ...recent, lastSeenTime: Date.now() - 7000 };
   assert.deepEqual(service.stepPhysicsTracking([expired]), []);
 });
 
