@@ -49,6 +49,12 @@ test('the long-range tiled pass demands a higher probability', () => {
   assert.ok(MIN_DISTANT_FACE_PROBABILITY > MIN_FACE_PROBABILITY);
 });
 
+test('the distant profile accepts a tiny source face after tile upscaling', () => {
+  const tiny = box(400, 250, 34, 0.97);
+  assert.equal(isPlausibleFace(tiny, FRAME_W, FRAME_H, 'standard'), false);
+  assert.equal(isPlausibleFace(tiny, FRAME_W, FRAME_H, 'distant'), true);
+});
+
 // --- geometry --------------------------------------------------------------
 
 test('absurd aspect ratios are rejected', () => {
@@ -212,13 +218,13 @@ test('a live face smaller than the absolute floor is not trusted for recognition
   assert.equal(isPlausibleFace(box(100, 100, MIN_ABSOLUTE_FACE_EDGE + 5, 0.99), FRAME_W, FRAME_H), true);
 });
 
-test('the absolute floor applies in upscaled tile coordinates so distant faces still pass through tiles', () => {
-  // Long-range tiles are enlarged ~2x before submission, so the floor is in
-  // tile pixels: a ~30px source face upscaled to 60px+ still gets its chance.
+test('the distant profile uses its lower tile-space floor', () => {
+  // The tile is enlarged before submission, so a small source face can still
+  // be useful without weakening the stricter standard full-frame pass.
   const tileW = 1180;
   const tileH = 892;
-  assert.equal(isPlausibleFace(box(100, 100, 40, 0.95), tileW, tileH, 'distant'), false);
-  assert.equal(isPlausibleFace(box(100, 100, 60, 0.95), tileW, tileH, 'distant'), true);
+  assert.equal(isPlausibleFace(box(100, 100, 24, 0.95), tileW, tileH, 'distant'), false);
+  assert.equal(isPlausibleFace(box(100, 100, 40, 0.95), tileW, tileH, 'distant'), true);
 });
 
 // --- landmark geometry -------------------------------------------------------

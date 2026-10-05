@@ -6,11 +6,13 @@ import { encodeCanvasWithinByteBudget } from './imageEncoding';
 // A face should disappear quickly after the detector loses it. Keeping a
 // person alive for multiple seconds is a common source of "ghost" sightings.
 const PERSON_TRACK_RETENTION_MS = 650;
+// Smaller overlapping crops let CompreFace spend its detector resolution on
+// a distant subject instead of resizing the entire wide camera frame down.
 const LONG_RANGE_TILE_COLUMNS = 3;
 const LONG_RANGE_TILE_ROWS = 2;
-const LONG_RANGE_TILE_WIDTH_RATIO = 0.46;
-const LONG_RANGE_TILE_HEIGHT_RATIO = 0.62;
-const LONG_RANGE_TILE_MAX_EDGE = 1600;
+const LONG_RANGE_TILE_WIDTH_RATIO = 0.38;
+const LONG_RANGE_TILE_HEIGHT_RATIO = 0.52;
+const LONG_RANGE_TILE_MAX_EDGE = 1900;
 
 export interface FaceTileBounds {
   x: number;

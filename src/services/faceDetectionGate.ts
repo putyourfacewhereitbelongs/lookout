@@ -146,9 +146,14 @@ export function isPlausibleFace(
   if (aspectRatio < MIN_ASPECT_RATIO || aspectRatio > MAX_ASPECT_RATIO) return false;
   if (relativeArea > MAX_RELATIVE_AREA) return false;
 
+  // Tiled distant scans deliberately enlarge the source crop before sending
+  // it to CompreFace. Their useful minimum is therefore lower than the
+  // standard full-frame pass: a roughly 16–20 px face in the source can become
+  // a recognisable 32+ px face in the enlarged tile.
+  const minimumAbsoluteEdge = profile === 'distant' ? 32 : MIN_ABSOLUTE_FACE_EDGE;
   const minEdge = Math.max(
     Math.min(frameWidth, frameHeight) * MIN_RELATIVE_EDGE,
-    MIN_ABSOLUTE_FACE_EDGE,
+    minimumAbsoluteEdge,
   );
   if (Math.min(width, height) < minEdge) return false;
 
