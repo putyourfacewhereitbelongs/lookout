@@ -142,24 +142,35 @@ app.post('/api/recognition/recognize', async (req, res) => {
         ? Math.min(0.95, Math.max(0.5, detProbThreshold))
         : null;
     const detectorThreshold = requestedThreshold ?? (isDistantScan ? 0.93 : 0.82);
-    const targetUrl = comprefaceUrl(
-      `/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&status=false`,
-    );
+    const targetUrls = [
+      comprefaceUrl(`/api/v1/recognition/recognize?det_prob_threshold=${detectorThreshold}&status=false`),
+      // Some older CompreFace gateways reject one or both optional query
+      // parameters. Retry the core endpoint so a gateway quirk cannot turn a
+      // valid camera frame into an apparent "no faces" result.
+      comprefaceUrl('/api/v1/recognition/recognize'),
+    ];
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), isDistantScan ? 8000 : 15000);
-    let response: Response;
+    let response: Response | null = null;
     try {
-      response = await fetch(targetUrl, {
-        method: 'POST',
-        headers: comprefaceHeaders(),
-        body: formData,
-        signal: controller.signal,
-      });
+      for (const targetUrl of targetUrls) {
+        const candidate = await fetch(targetUrl, {
+          method: 'POST',
+          headers: comprefaceHeaders(),
+          body: formData,
+          signal: controller.signal,
+        });
+        response = candidate;
+        // Only retry compatibility errors; provider outages and auth errors
+        // should be reported instead of issuing a second expensive inference.
+        if (candidate.ok || ![400, 404, 422].includes(candidate.status)) break;
+      }
     } finally {
       clearTimeout(timeout);
     }
 
+    if (!response) throw new Error('Recognition provider returned no response');
     const data: any = await response.json().catch(() => null);
 
     if (!response.ok) {
